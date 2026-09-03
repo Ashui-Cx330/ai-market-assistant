@@ -5,18 +5,18 @@
 - Owner：Ashui-Cx330
 - Repository：ai-market-assistant
 - Remote：https://github.com/Ashui-Cx330/ai-market-assistant.git
-- 当前发布阶段：v1.0.0 构建及发布前检查已通过，等待上传 Release。
+- 当前发布阶段：v1.0.0 已发布，v1.0.1 安装包及更新元数据已通过发布前检查。
 
 ## 客户端
 
-- 当前正式构建：v1.0.0
+- 当前正式构建：v1.0.1
 - 安装目录：`%LOCALAPPDATA%\Programs\AI行情助手`
 - 用户数据：`%APPDATA%\AI行情助手`
 
-## v1.0.0 发布文件
+## v1.0.1 发布文件
 
-- `AI-Market-Assistant-Setup-v1.0.0.exe`
-- `AI-Market-Assistant-Setup-v1.0.0.exe.blockmap`
+- `AI-Market-Assistant-Setup-v1.0.1.exe`
+- `AI-Market-Assistant-Setup-v1.0.1.exe.blockmap`
 - `latest.yml`
 
 三个文件由同一次 electron-builder 构建生成。发布前检查已验证版本、路径、SHA512、安装包大小、blockmap 内部映射大小及内置 GitHub provider。
