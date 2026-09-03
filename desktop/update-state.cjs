@@ -15,7 +15,15 @@ function writeState(changes) {
   fs.mkdirSync(path.dirname(statePath()), { recursive: true })
   const temporary = `${statePath()}.tmp`
   fs.writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
-  fs.renameSync(temporary, statePath())
+  try {
+    fs.renameSync(temporary, statePath())
+  } catch (error) {
+    if (error?.code !== 'EXDEV') throw error
+    // EFS-encrypted Windows profile directories can reject an otherwise local
+    // atomic rename. Preserve correctness with a flushed copy fallback.
+    fs.copyFileSync(temporary, statePath())
+    fs.unlinkSync(temporary)
+  }
   return next
 }
 
