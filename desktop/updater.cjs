@@ -28,9 +28,17 @@ function configureUpdater() {
   if (configured) return autoUpdater
   const configuration = updateConfiguration()
   if (!configuration) return null
+  // Some Windows profiles use EFS for LocalAppData. electron-updater downloads
+  // into LocalAppData by default, but an atomic rename of its temporary file can
+  // then fail with EXDEV. The per-user Temp directory is on the same machine,
+  // is writable without elevation, and does not contain persistent user data.
+  if (process.platform === 'win32' && autoUpdater.app) {
+    autoUpdater.app.baseCachePath = app.getPath('temp')
+  }
   if (!configuration.embedded) autoUpdater.setFeedURL(configuration)
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
+  autoUpdater.disableWebInstaller = true
   autoUpdater.logger = {
     info: value => logger(concise(value)), warn: value => logger(concise(value)),
     error: value => logger(concise(value)), debug: value => logger(concise(value))
