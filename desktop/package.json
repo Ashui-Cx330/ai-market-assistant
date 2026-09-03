@@ -1,0 +1,48 @@
+{
+  "name": "ai-market-assistant-desktop",
+  "productName": "AI行情助手",
+  "version": "1.0.0",
+  "private": true,
+  "author": "AI行情助手 Project",
+  "description": "本地 AI 股票与加密货币行情研究平台",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "verify": "node verify.cjs",
+    "test:e2e": "node e2e.cjs",
+    "dist": "electron-builder --config electron-builder.config.cjs --win nsis"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.9"
+  },
+  "devDependencies": {
+    "electron-builder": "26.15.3",
+    "electron": "44.1.1",
+    "playwright": "^1.62.1"
+  },
+  "build": {
+    "appId": "com.tradingai.marketassistant",
+    "productName": "AI行情助手",
+    "asar": true,
+    "asarUnpack": ["rollback-guard.ps1"],
+    "directories": { "output": "../outputs/desktop" },
+    "artifactName": "AI-Market-Assistant-Setup-v${version}.${ext}",
+    "files": ["main.cjs", "preload.cjs", "updater.cjs", "update-state.cjs", "rollback-guard.ps1", "assets/**/*", "package.json"],
+    "extraResources": [
+      {"from": "../backend-dist/AI行情助手服务.exe", "to": "backend/AI行情助手服务.exe"},
+      {"from": "../frontend/dist", "to": "app/frontend/dist"},
+      {"from": "../version.json", "to": "app/version.json"}
+    ],
+    "win": {"target": "nsis", "icon": "assets/app-icon.ico"},
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "AI行情助手",
+      "uninstallDisplayName": "AI行情助手",
+      "include": "installer.nsh"
+    }
+  }
+}
