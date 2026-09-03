@@ -108,6 +108,13 @@ async function createWindow() {
     if (rendererReady && serviceHealthy) break
     await new Promise(resolve => setTimeout(resolve, 1000))
   }
+  // Release acceptance hook: lets the automated Windows update test prove that
+  // the external rollback guard restores the prior version after a bad launch.
+  // It is inactive for normal users and is never persisted in application data.
+  if (process.env.AI_FORCE_STARTUP_HEALTH_FAILURE === '1') {
+    rendererReady = false
+    log('startup health failure injected for release acceptance test')
+  }
   log(`startup health: electron=ok renderer=${rendererReady ? 'ok' : 'failed'} backend/database/api=${serviceHealthy ? 'ok' : 'failed'}`)
   if (!rendererReady || !serviceHealthy) throw new Error('启动健康检查失败：页面、本地服务或数据库未就绪。')
   log('main window loaded')

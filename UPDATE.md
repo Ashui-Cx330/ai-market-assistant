@@ -1,6 +1,6 @@
 # AI行情助手自动更新与发布
 
-当前正式版本：**v1.0.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。
+当前正式版本：**v1.0.1**。更新仓库：`Ashui-Cx330/ai-market-assistant`。
 
 ## 当前实现
 
@@ -16,15 +16,13 @@
 
 ## 一键发布
 
-真实 GitHub 仓库准备好并安装、登录 GitHub CLI 后，设置：
+GitHub CLI 登录一次后，直接运行：
 
 ```powershell
-$env:GH_OWNER = '真实 owner'
-$env:GH_REPO = '真实 repo'
 .\release.bat
 ```
 
-不指定版本时，脚本自动增加 PATCH 版本。它会统一版本号、构建、生成并校验三个发布资产、提交版本、创建并推送 Tag、创建 GitHub Release，然后再次核对线上资产。任何检查失败都会停止发布。
+脚本会自动读取当前 GitHub 用户和 origin 仓库。不指定版本时自动增加 PATCH 版本，并依次统一版本号、构建、校验三个发布资产、提交代码、推送 GitHub、创建 Release、复核线上资产。任何检查失败都会停止并指出失败步骤。
 
 `scripts\release-check.ps1` 验证版本、Tag、安装包、latest.yml 必需字段、SHA512、blockmap 内部块总大小、内置 updater 仓库、GitHub Release、桌面快捷方式和数据目录分离。
 

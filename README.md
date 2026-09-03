@@ -4,12 +4,12 @@
 
 ## Windows 安装
 
-双击 `outputs\desktop\AI-Market-Assistant-Setup-v1.0.0.exe` 完成安装。桌面会出现“AI行情助手”，以后直接双击即可；无需打开项目目录、Python、Node、Docker 或命令行。
+双击 `outputs\desktop\AI-Market-Assistant-Setup-v1.0.1.exe` 完成安装。桌面会出现“AI行情助手”，以后直接双击即可；无需打开项目目录、Python、Node、Docker 或命令行。
 
 - 程序目录：`%LOCALAPPDATA%\Programs\AI行情助手`
 - 用户数据：`%APPDATA%\AI行情助手`
 - 卸载入口：Windows“已安装的应用”或开始菜单卸载项
-- 自动更新：启动自动检查，并可在“设置与更新”手动检查；真实 GitHub 发布方法和当前外部阻塞见 `UPDATE.md`
+- 自动更新：启动自动检查，并可在“设置与更新”手动检查；真实 GitHub 发布方法见 `UPDATE.md`
 
 ## 已实现功能
 
