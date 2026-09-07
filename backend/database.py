@@ -102,7 +102,11 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS historical_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, news_id TEXT NOT NULL, symbol TEXT,
                 event_time TEXT NOT NULL, entry_time TEXT NOT NULL, t1_return REAL, t3_return REAL,
-                t5_return REAL, t20_return REAL, UNIQUE(news_id,symbol)
+                t5_return REAL, t10_return REAL, t20_return REAL, payload_json TEXT, UNIQUE(news_id,symbol)
+            );
+            CREATE TABLE IF NOT EXISTS news_provider_health (
+                provider TEXT PRIMARY KEY, status TEXT NOT NULL, item_count INTEGER NOT NULL,
+                latency_ms INTEGER, error TEXT, markets TEXT, checked_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS news_prediction_signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, decision_time TEXT NOT NULL,
@@ -120,6 +124,9 @@ def init_db() -> None:
                     "strategy_version":"TEXT","tp2":"REAL","probability_calibration":"TEXT"}
         for name,sql_type in migrations.items():
             if name not in prediction_columns:conn.execute(f"ALTER TABLE prediction_history ADD COLUMN {name} {sql_type}")
+        historical_columns={row[1] for row in conn.execute("PRAGMA table_info(historical_events)")}
+        for name,sql_type in {"t10_return":"REAL","payload_json":"TEXT"}.items():
+            if name not in historical_columns:conn.execute(f"ALTER TABLE historical_events ADD COLUMN {name} {sql_type}")
         conn.executemany("INSERT OR IGNORE INTO paper_accounts(currency,cash,initial_cash) VALUES(?,?,?)",
                          [("USDT",100000.0,100000.0),("CNY",100000.0,100000.0)])
         count = conn.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0]
@@ -152,9 +159,13 @@ def save_news_intelligence(items: list[dict], symbol: str | None = None) -> int:
                           json.dumps(sentiment, ensure_ascii=False)))
             conn.execute("INSERT OR REPLACE INTO news_impacts VALUES(?,?,?)",
                          (item["id"], impact["score"], json.dumps(impact, ensure_ascii=False)))
-            if symbol:
+            # Never associate every result with the query target. Only explicit
+            # entities/provider metadata become relations.
+            conn.execute("DELETE FROM news_stock_relations WHERE news_id=?", (item["id"],))
+            for related in item.get("symbols", []) or item.get("event", {}).get("affected_symbols", []):
+                relation = "provider-metadata" if related in item.get("symbols", []) else "entity-match"
                 conn.execute("INSERT OR REPLACE INTO news_stock_relations VALUES(?,?,?)",
-                             (item["id"], symbol, "query-target"))
+                             (item["id"], str(related).upper(), relation))
             for relation in impact.get("secondary", []):
                 conn.execute("INSERT OR REPLACE INTO news_sector_relations VALUES(?,?,?)",
                              (item["id"], relation["target"], relation["direction"]))
@@ -165,11 +176,84 @@ def save_news_intelligence(items: list[dict], symbol: str | None = None) -> int:
 def load_news_intelligence(symbol: str | None = None, limit: int = 500) -> list[dict]:
     with connection() as conn:
         if symbol:
-            rows = conn.execute("""SELECT n.payload_json FROM news n JOIN news_stock_relations r ON r.news_id=n.id
+            rows = conn.execute("""SELECT n.payload_json,h.payload_json AS outcome_json FROM news n
+                JOIN news_stock_relations r ON r.news_id=n.id
+                LEFT JOIN historical_events h ON h.news_id=n.id AND h.symbol=r.symbol
                 WHERE r.symbol=? ORDER BY COALESCE(n.published_at,n.collected_at) DESC LIMIT ?""", (symbol, limit)).fetchall()
         else:
             rows = conn.execute("SELECT payload_json FROM news ORDER BY COALESCE(published_at,collected_at) DESC LIMIT ?", (limit,)).fetchall()
-    return [json.loads(row[0]) for row in rows]
+    result=[]
+    for row in rows:
+        item=json.loads(row[0])
+        if len(row.keys())>1 and row["outcome_json"]: item["historical_outcome"]=json.loads(row["outcome_json"])
+        result.append(item)
+    return result
+
+
+def query_news_intelligence(symbol: str | None = None, market: str | None = None,
+                            category: str | None = None, direction: str | None = None,
+                            keyword: str | None = None, hours: int | None = None,
+                            page: int = 1, page_size: int = 20) -> dict:
+    """Filter persisted normalized payloads and paginate after deterministic sorting."""
+    from datetime import datetime, timedelta, timezone
+    rows = load_news_intelligence(symbol, 5000)
+    needle = (keyword or "").strip().lower()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours) if hours else None
+    selected = []
+    for item in rows:
+        if "�" in str(item.get("title") or ""): continue
+        if market and market not in {"全部", "全球"} and item.get("market") != market: continue
+        if category and category != "全部" and item.get("category") != category: continue
+        label = item.get("sentiment", {}).get("label")
+        wanted = {"利好":"bullish", "利空":"bearish", "中性":"neutral"}.get(direction, direction)
+        if wanted and wanted not in {"全部", "all"} and label != wanted: continue
+        if needle and needle not in f"{item.get('title','')} {item.get('summary','')} {' '.join(item.get('symbols',[]))} {' '.join(item.get('sectors',[]))}".lower(): continue
+        if cutoff:
+            try:
+                stamp=datetime.fromisoformat(str(item.get("published_at")).replace("Z","+00:00"))
+                if stamp.tzinfo is None: stamp=stamp.replace(tzinfo=timezone.utc)
+                if stamp < cutoff: continue
+            except (TypeError,ValueError): continue
+        selected.append(item)
+    selected.sort(key=lambda x:(x.get("impact",{}).get("score",0),x.get("published_at") or ""),reverse=True)
+    start=(max(1,page)-1)*page_size
+    return {"items":selected[start:start+page_size],"total":len(selected),"page":max(1,page),
+            "page_size":page_size,"has_more":start+page_size<len(selected)}
+
+
+def get_news_intelligence(news_id: str) -> dict | None:
+    with connection() as conn:
+        row=conn.execute("SELECT payload_json FROM news WHERE id=?",(news_id,)).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def save_provider_health(statuses: list[dict]) -> None:
+    from datetime import datetime, timezone
+    checked=datetime.now(timezone.utc).isoformat()
+    with connection() as conn:
+        for row in statuses:
+            conn.execute("""INSERT OR REPLACE INTO news_provider_health
+                (provider,status,item_count,latency_ms,error,markets,checked_at) VALUES(?,?,?,?,?,?,?)""",
+                (row["provider"],row["status"],row.get("count",0),row.get("latency_ms"),row.get("error"),
+                 json.dumps(row.get("markets",[]),ensure_ascii=False),checked))
+
+
+def load_provider_health() -> list[dict]:
+    with connection() as conn: rows=conn.execute("SELECT * FROM news_provider_health ORDER BY provider").fetchall()
+    return [{**dict(row),"markets":json.loads(row["markets"] or "[]")} for row in rows]
+
+
+def save_historical_event_outcomes(symbol: str, outcomes: list[dict]) -> int:
+    count=0
+    with connection() as conn:
+        for row in outcomes:
+            returns=row.get("returns",{})
+            conn.execute("""INSERT OR REPLACE INTO historical_events
+                (news_id,symbol,event_time,entry_time,t1_return,t3_return,t5_return,t10_return,t20_return,payload_json)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""",(row["news_id"],symbol,row["event_time"],row["entry_time"],
+                returns.get("T+1"),returns.get("T+3"),returns.get("T+5"),returns.get("T+10"),returns.get("T+20"),
+                json.dumps(row,ensure_ascii=False)));count+=1
+    return count
 
 
 def list_watchlist() -> list[dict]:

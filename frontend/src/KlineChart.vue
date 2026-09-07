@@ -3,6 +3,7 @@ import * as echarts from 'echarts'
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { Candle, IndicatorSet } from './api'
 const props=defineProps<{candles:Candle[];indicators:IndicatorSet|null;structure?:any;news?:any[]}>()
+const emit=defineEmits<{(e:'news-click',item:any):void}>()
 const root=ref<HTMLDivElement>();let chart:echarts.ECharts|null=null
 function values(key:string){return props.indicators?.series.map(x=>x[key]??'-')||[]}
 function render(){
@@ -25,7 +26,7 @@ function render(){
     let index=0,best=Infinity
     props.candles.forEach((bar,i)=>{const distance=Math.abs(Date.parse(bar.timestamp)-stamp);if(distance<best){best=distance;index=i}})
     marks.push({name:'新闻',value:item.event?.event_type||'新闻',coord:[labels[index],props.candles[index].close],symbol:'pin',symbolSize:48,
-      itemStyle:{color:(item.sentiment?.score||0)>=0?'#22c997':'#f15b72'},label:{color:'#fff',formatter:'新闻'}})
+      newsItem:item,itemStyle:{color:(item.sentiment?.score||0)>=0?'#22c997':'#f15b72'},label:{color:'#fff',formatter:'新闻'}})
   }
   const fibLines:any[]=Object.entries(technical?.fibonacci?.levels||{})
     .filter(([ratio])=>['0.382','0.5','0.618','0.786','1.272','1.618'].includes(ratio))
@@ -72,6 +73,8 @@ function render(){
     ]
   }
   chart.setOption(option,true)
+  chart.off('click')
+  chart.on('click',(params:any)=>{if(params?.data?.newsItem)emit('news-click',params.data.newsItem)})
 }
 const resize=()=>chart?.resize();onMounted(()=>{nextTick(render);window.addEventListener('resize',resize)});watch(()=>[props.candles,props.indicators,props.structure,props.news],()=>nextTick(render),{deep:true});onBeforeUnmount(()=>{window.removeEventListener('resize',resize);chart?.dispose()})
 </script>

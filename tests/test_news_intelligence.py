@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from backend.news_intelligence import EventExtractionEngine, build_intelligence, event_backtest
+from backend.news_intelligence import EventExtractionEngine, NewsQuery, _dedupe, _filter, build_intelligence, event_backtest
 
 
 def item(identity: str, title: str, published: str):
@@ -14,7 +14,9 @@ def test_event_sentiment_and_causal_impact_are_explainable():
     assert result["sentiment"]["score"] > 0
     assert result["sentiment"]["direction"] in {"利好","强利好"}
     assert result["sentiment"]["method"].endswith("(not FinBERT/LLM)")
-    assert result["impact"]["primary"] and result["impact"]["counter"]
+    # No explicit entity is present, so the engine must not invent a direct stock relation.
+    assert result["impact"]["primary"] == []
+    assert result["impact"]["counter"]
 
 
 def test_intelligence_does_not_claim_fake_accuracy():
@@ -38,3 +40,32 @@ def test_point_in_time_backtest_enters_strictly_after_publication_and_rejects_sm
     assert result["outcomes"][0]["entry_time"] == candles[1]["timestamp"]
     future=EventExtractionEngine().analyze(item("2","公司回购",(start+timedelta(days=100)).isoformat()),"600519","测试公司")
     assert event_backtest([future],candles)["samples"] == 0
+
+
+def test_entity_linking_does_not_force_unrelated_query_target():
+    stamp="2026-01-01T00:00:00+00:00"
+    unrelated=EventExtractionEngine().analyze(item("u","美联储讨论利率政策",stamp),"600519","贵州茅台")
+    related=EventExtractionEngine().analyze(item("r","贵州茅台发布回购公告",stamp),"600519","贵州茅台")
+    assert "600519" not in unrelated["symbols"]
+    assert "600519" in related["symbols"]
+
+
+def test_symbol_filter_and_fuzzy_dedup_are_deterministic():
+    stamp="2026-01-01T00:00:00+00:00"
+    a=item("a","英伟达财报超预期 - 媒体甲",stamp);a.update({"summary":"","symbols":[],"sectors":[]})
+    b=item("b","英伟达财报超预期 | 媒体乙",stamp);b.update({"summary":"","symbols":[],"sectors":[]})
+    rows=_filter([a,b],NewsQuery(symbol="NVDA",name="英伟达"))
+    merged=_dedupe(rows)
+    assert len(merged)==1 and merged[0]["related_source_count"]==2
+
+
+def test_backtest_filters_direction_and_uses_trading_bars_for_t10():
+    start=datetime(2026,1,1,tzinfo=timezone.utc);candles=[];events=[]
+    for index in range(80):
+        candles.append({"timestamp":(start+timedelta(days=index)).isoformat(),"open":100+index,"high":102+index,"low":99+index,"close":101+index,"volume":100})
+    for index in range(12):
+        event=EventExtractionEngine().analyze(item(str(index),"公司回购",(start+timedelta(days=index*2,hours=12)).isoformat()),"600519","测试公司")
+        event["impact"]["score"]=80;events.append(event)
+    result=event_backtest(events,candles,direction="bullish",min_impact=70,min_confidence=.5,selected_horizon=10)
+    assert result["status"]=="AVAILABLE" and result["samples"]==12
+    assert result["metrics"]["T+10"]["samples"]==12

@@ -61,7 +61,10 @@ const marketContext = ref<any>(null),
 const newsIntelligence = ref<any>(null),
   newsLoading = ref(false),
   newsError = ref(""),
-  newsBacktest = ref<any>(null);
+  newsBacktest = ref<any>(null), newsSelected=ref<any>(null), newsDialogOpen=ref(false),
+  newsMarket=ref("全部"),newsCategory=ref("全部"),newsDirection=ref("全部"),newsHours=ref(168),
+  newsKeyword=ref(""),newsPage=ref(1),newsBacktestDirection=ref("bullish"),
+  newsBacktestImpact=ref(70),newsBacktestConfidence=ref(60),newsBacktestHorizon=ref(5);
 const orderAmount = ref(1000),
   orderLoading = ref(false),
   watchlist = ref<any[]>([]),
@@ -190,10 +193,12 @@ async function loadNews(asset?: Asset) {
   newsError.value = "";
   try {
     const target = asset || (page.value === "detail" ? selected.value || undefined : undefined);
-    const params = target
-      ? `?symbol=${encodeURIComponent(target.symbol)}&asset_type=${target.asset_type}&name=${encodeURIComponent(target.name)}`
-      : "";
-    newsIntelligence.value = await request<any>(`/api/news/intelligence${params}`);
+    const queryParams=new URLSearchParams();
+    if(target){queryParams.set('symbol',target.symbol);queryParams.set('asset_type',target.asset_type);queryParams.set('name',target.name)}
+    if(!target){if(newsMarket.value!=='全部')queryParams.set('market',newsMarket.value);if(newsCategory.value!=='全部')queryParams.set('category',newsCategory.value);if(newsDirection.value!=='全部')queryParams.set('direction',newsDirection.value);if(newsHours.value)queryParams.set('hours',String(newsHours.value));if(newsKeyword.value.trim())queryParams.set('keyword',newsKeyword.value.trim());queryParams.set('page',String(newsPage.value));queryParams.set('page_size','20')}
+    const result=await request<any>(`/api/news/intelligence?${queryParams}`);
+    if(target && (page.value!=='detail'||selected.value?.symbol!==target.symbol))return;
+    newsIntelligence.value = result;
   } catch (e) {
     newsError.value = e instanceof Error ? e.message : "新闻数据源暂不可用";
   } finally {
@@ -203,8 +208,15 @@ async function loadNews(asset?: Asset) {
 
 async function showNews() {
   page.value = "news";
+  newsPage.value=1;
   await loadNews();
 }
+
+function openNews(item:any){const outcome=(newsBacktest.value?.outcomes||[]).find((x:any)=>x.news_id===item.id);newsSelected.value=outcome?{...item,historical_outcome:outcome}:item;newsDialogOpen.value=true}
+function newsClass(item:any){return item?.sentiment?.label==='bullish'?'positive':item?.sentiment?.label==='bearish'?'negative':'neutral'}
+function stars(score:number){return '★'.repeat(Math.max(1,Math.ceil((score||0)/20)))+'☆'.repeat(Math.max(0,5-Math.ceil((score||0)/20)))}
+async function applyNewsFilters(){newsPage.value=1;await loadNews()}
+async function loadMoreNews(){if(!newsIntelligence?.value?.has_more)return;newsPage.value+=1;const old=[...(newsIntelligence.value.items||[])];await loadNews();newsIntelligence.value.items=[...old,...(newsIntelligence.value.items||[])];newsIntelligence.value.all_news=newsIntelligence.value.items}
 
 async function runNewsBacktest() {
   if (!selected.value) return;
@@ -212,6 +224,8 @@ async function runNewsBacktest() {
     symbol: selected.value.symbol,
     asset_type: selected.value.asset_type,
     interval: interval.value,
+    direction:newsBacktestDirection.value,min_impact:newsBacktestImpact.value,
+    min_confidence:newsBacktestConfidence.value,horizon:newsBacktestHorizon.value,
   }).catch((e) => ({ status: "ERROR", notice: e instanceof Error ? e.message : "回测失败" }));
 }
 async function loadQuote() {
@@ -752,6 +766,14 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
         </el-alert>
         <div v-if="newsLoading" class="loading-box">正在采集真实公开新闻并执行事件分析…</div>
         <template v-else-if="newsIntelligence">
+          <section class="panel news-filters">
+            <div><label>市场</label><select v-model="newsMarket"><option>全部</option><option>A股</option><option>美股</option><option>加密货币</option><option>全球</option></select></div>
+            <div><label>类型</label><select v-model="newsCategory"><option>全部</option><option>公司</option><option>行业</option><option>政策</option><option>宏观</option><option>财报</option><option>公告</option><option>市场</option><option>地缘政治</option></select></div>
+            <div><label>方向</label><select v-model="newsDirection"><option>全部</option><option>利好</option><option>利空</option><option>中性</option></select></div>
+            <div><label>时间</label><select v-model.number="newsHours"><option :value="1">1小时</option><option :value="6">6小时</option><option :value="24">24小时</option><option :value="72">3天</option><option :value="168">7天</option><option :value="0">全部</option></select></div>
+            <div class="news-search"><label>新闻 / 股票 / 板块</label><input v-model="newsKeyword" @keyup.enter="applyNewsFilters" placeholder="美联储、英伟达、半导体、BTC" /></div>
+            <button class="primary" @click="applyNewsFilters">筛选</button>
+          </section>
           <section class="panel intelligence-hero">
             <div><span class="eyebrow">TODAY'S MARKET RADAR</span><h2>{{ newsIntelligence.radar.market_sentiment }}</h2><p>市场新闻情绪分（-100 ~ +100）</p></div>
             <div class="news-radar">
@@ -777,16 +799,19 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
             <div class="panel"><h3>AI 关注名单</h3><div class="level-list"><div v-for="item in newsIntelligence.watch_list" :key="item.id"><b>{{ item.event.subject }} · {{ item.event.direction }} · 评分 {{ item.impact.score }}</b><span>{{ item.one_sentence_summary }}</span></div><p v-if="!newsIntelligence.watch_list.length" class="data-warning">暂无达到关注阈值的真实新闻。</p></div></div>
             <div class="panel"><h3>AI 风险名单</h3><div class="level-list"><div v-for="item in newsIntelligence.risk_list" :key="item.id"><b class="negative">{{ item.event.subject }} · {{ item.event.direction }} · 评分 {{ item.impact.score }}</b><span>{{ item.one_sentence_summary }}</span></div><p v-if="!newsIntelligence.risk_list.length" class="data-warning">暂无达到风险阈值的真实新闻。</p></div></div>
           </section>
-          <section class="panel"><h3>历史相似事件</h3><div class="level-list"><template v-for="group in newsIntelligence.historical_similar_events" :key="group.current_news_id"><div v-for="match in group.matches" :key="match.news_id"><b>相似度证据 {{ match.similarity_evidence }} · {{ match.outcome_status }}</b><span>{{ match.event_time?.replace('T',' ').slice(0,19) }} · {{ match.title }}</span></div></template><p v-if="!newsIntelligence.historical_similar_events.length" class="data-warning">当前真实样本中尚无可匹配的更早同类事件。</p></div></section>
-          <section class="panel"><div class="panel-top"><div><h3>今日最重要的 10 条新闻</h3><p>按事件影响分排序，不按发布时间冒充重要性</p></div><small>{{ newsIntelligence.method }}</small></div>
-            <div class="news-list"><article v-for="item in newsIntelligence.top_news" :key="item.id">
-              <div class="news-score" :class="item.sentiment.score >= 10 ? 'positive' : item.sentiment.score <= -10 ? 'negative' : ''">{{ item.sentiment.score > 0 ? '+' : '' }}{{ item.sentiment.score }}</div>
-              <div><a :href="item.url" target="_blank">{{ item.title }}</a><p>{{ item.category }} · {{ item.event.event_type }} · 影响 {{ item.impact.score }} · {{ item.source }}</p><small>{{ item.published_at?.replace('T',' ').slice(0,19) || '发布时间未知（禁止进入回测）' }}</small>
-                <details><summary>事件影响图谱</summary><p v-for="impact in [...item.impact.primary,...item.impact.secondary,...item.impact.counter]" :key="impact.target"><b>{{ impact.target }} · {{ impact.direction }}</b> — {{ impact.reason }}</p></details>
+          <section class="panel"><div class="panel-top"><div><h3>真实新闻列表</h3><p>共 {{ newsIntelligence.total }} 条 · 默认按影响程度与时间排序 · 每页 20 条</p></div><small>{{ newsIntelligence.method }}</small></div>
+            <div v-if="!newsIntelligence.items?.length" class="empty">当前筛选条件下暂无可用真实新闻，请调整筛选或稍后重试。</div>
+            <div class="news-list rich-news"><article v-for="item in newsIntelligence.items" :key="item.id" @click="openNews(item)">
+              <div class="news-score" :class="newsClass(item)"><span>{{ item.event.direction }}</span><b>{{ item.impact.score }}</b></div>
+              <div><h3 :class="newsClass(item)">{{ item.event.direction }} · {{ item.title }}</h3><p>{{ item.summary }}</p><small>{{ item.published_at?.replace('T',' ').slice(0,19) || '发布时间未知（禁止进入回测）' }} · {{ item.source }} · {{ item.market }} · {{ item.category }}</small>
+                <div class="news-tags"><span v-for="symbol in item.symbols" :key="symbol">{{ symbol }}</span><span v-for="sector in item.sectors" :key="sector">{{ sector }}</span><em>{{ stars(item.impact.score) }} {{ item.impact.level }}</em><em>分析：{{ item.analysis_status }}</em><em v-if="item.related_source_count>1">相关新闻 {{ item.related_source_count }} 条</em></div>
+                <p><b>为什么{{ item.event.direction }}：</b>{{ item.reason.join('；') }}</p>
+                <button @click.stop="openNews(item)">查看完整影响</button> <a @click.stop :href="item.url" target="_blank">查看原文</a>
               </div>
             </article></div>
+            <button v-if="newsIntelligence.has_more" class="load-more" @click="loadMoreNews">加载更多</button>
           </section>
-          <p class="data-warning">Point-in-Time：{{ newsIntelligence.point_in_time }} · 数据源异常数 {{ newsIntelligence.provider_errors?.length || 0 }}</p>
+          <section class="panel"><h3>数据源状态</h3><div class="provider-health"><span v-for="provider in newsIntelligence.provider_statuses" :key="provider.provider" :class="provider.status==='HEALTHY'?'positive':'negative'">{{ provider.status==='HEALTHY'?'●':'●' }} {{ provider.provider }} · {{ provider.count }} 条 · {{ provider.latency_ms }}ms</span></div><p class="data-warning">Point-in-Time：{{ newsIntelligence.point_in_time }} · 缓存降级 {{ newsIntelligence.cache_fallback?'已启用':'未启用' }}</p></section>
         </template>
       </template>
 
@@ -879,14 +904,16 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
           <div v-if="detailLoading" class="loading-box">
             正在获取 {{ interval.toUpperCase() }} 真实 K线…
           </div>
-          <KlineChart v-else :candles="candles" :indicators="indicators" :structure="aiResult?.decision_center?.technical_strategy" :news="newsIntelligence?.top_news || []" />
+          <KlineChart v-else :candles="candles" :indicators="indicators" :structure="aiResult?.decision_center?.technical_strategy" :news="newsIntelligence?.top_news || []" @news-click="openNews" />
         </section>
         <section v-if="newsIntelligence" class="panel">
-          <div class="panel-top"><div><h3>个股 / 币种 AI 情报</h3><p>新闻 → 事件 → 影响 → 技术面融合</p></div><button @click="runNewsBacktest">新闻策略回测</button></div>
+          <div class="panel-top"><div><h3>最新相关新闻</h3><p>仅显示明确提及 {{ selected?.name }} / {{ selected?.symbol }} 的新闻</p></div></div>
           <div class="decision-bars"><span>BUY {{ newsIntelligence.decision.scores.buy }}</span><span>HOLD {{ newsIntelligence.decision.scores.hold }}</span><span>AVOID {{ newsIntelligence.decision.scores.avoid }}</span></div>
           <h3>{{ newsIntelligence.decision.view }}</h3>
-          <div class="news-list compact-news"><article v-for="item in newsIntelligence.top_news.slice(0,5)" :key="item.id"><div class="news-score" :class="item.sentiment.score >= 10 ? 'positive' : item.sentiment.score <= -10 ? 'negative' : ''">{{ item.sentiment.score }}</div><div><a :href="item.url" target="_blank">{{ item.title }}</a><p>{{ item.event.direction }} · {{ item.event.event_type }} · 影响 {{ item.impact.score }}</p></div></article></div>
-          <p v-if="newsBacktest" class="data-warning">新闻回测：{{ newsBacktest.status }} · 样本 {{ newsBacktest.samples }} · {{ newsBacktest.notice || `T+5 胜率 ${probability(newsBacktest.win_rate_t5)}` }}</p>
+          <div class="news-list compact-news"><article v-for="item in newsIntelligence.items?.slice(0,5)" :key="item.id" @click="openNews(item)"><div class="news-score" :class="newsClass(item)">{{ item.impact.score }}</div><div><b>{{ item.title }}</b><p>{{ item.event.direction }} · {{ item.event.event_type }} · 影响 {{ stars(item.impact.score) }}</p></div></article></div>
+          <div class="news-backtest-form"><select v-model="newsBacktestDirection"><option value="bullish">利好</option><option value="bearish">利空</option><option value="all">全部</option></select><label>最低影响 <input v-model.number="newsBacktestImpact" type="number" min="0" max="100" /></label><label>最低置信度% <input v-model.number="newsBacktestConfidence" type="number" min="0" max="100" /></label><select v-model.number="newsBacktestHorizon"><option :value="1">T+1</option><option :value="3">T+3</option><option :value="5">T+5</option><option :value="10">T+10</option><option :value="20">T+20</option></select><button class="primary" @click="runNewsBacktest">开始新闻策略回测</button></div>
+          <div v-if="newsBacktest" class="backtest-metrics"><div><span>状态</span><b>{{ newsBacktest.status }}</b></div><div><span>样本</span><b>{{ newsBacktest.samples }}</b></div><div><span>方向胜率</span><b>{{ newsBacktest.win_rate==null?'—':probability(newsBacktest.win_rate) }}</b></div><div><span>平均收益</span><b>{{ newsBacktest.average_return==null?'—':probability(newsBacktest.average_return) }}</b></div><div><span>最大 / 最小</span><b>{{ newsBacktest.max_return==null?'—':`${probability(newsBacktest.max_return)} / ${probability(newsBacktest.min_return)}` }}</b></div><div><span>最大回撤</span><b>{{ probability(newsBacktest.max_drawdown) }}</b></div></div>
+          <p v-if="newsBacktest?.notice" class="data-warning">{{ newsBacktest.notice }}</p>
         </section>
         <section v-if="indicators" class="panel">
           <div class="panel-top">
@@ -1339,6 +1366,19 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
           </p>
         </section></template
       >
+      <el-dialog v-model="newsDialogOpen" title="新闻事件详情" width="760px" append-to-body>
+        <div v-if="newsSelected" class="news-detail-dialog">
+          <h2 :class="newsClass(newsSelected)">{{ newsSelected.event.direction }} · {{ newsSelected.title }}</h2>
+          <p>{{ newsSelected.summary }}</p><small>{{ newsSelected.published_at?.replace('T',' ').slice(0,19) }} · {{ newsSelected.source }} · {{ newsSelected.market }}</small>
+          <div class="impact-banner"><b>Impact {{ newsSelected.impact.score }}/100</b><span>{{ stars(newsSelected.impact.score) }} · 可信度 {{ Math.round(newsSelected.event.confidence*100) }}%</span></div>
+          <h3>为什么这样判断</h3><ol><li v-for="reason in newsSelected.reason" :key="reason">{{ reason }}</li></ol>
+          <div class="two-col"><div><h3>直接影响</h3><p v-for="x in newsSelected.impact.primary" :key="x.target"><b>{{ x.target }} · {{ x.direction }}</b><br>{{ x.reason }}</p><p v-if="!newsSelected.impact.primary.length">未识别到可验证的直接标的，不强行关联。</p></div><div><h3>行业 / 间接影响</h3><p v-for="x in newsSelected.impact.secondary" :key="x.target"><b>{{ x.target }} · {{ x.direction }}</b><br>{{ x.reason }}</p></div></div>
+          <h3>潜在反向影响 / 风险</h3><p v-for="x in newsSelected.impact.counter" :key="x.target"><b>{{ x.target }}</b>：{{ x.reason }}</p><p v-if="!newsSelected.impact.counter.length">规则引擎未识别到明确反向影响。</p>
+          <template v-if="newsSelected.historical_outcome"><h3>新闻发布后真实市场表现</h3><div class="backtest-metrics"><div v-for="(value,key) in newsSelected.historical_outcome.returns" :key="key"><span>{{ key }}</span><b :class="trendClass(value as number)">{{ probability(value as number) }}</b></div></div><p>回测入场：{{ newsSelected.historical_outcome.entry_time }} · {{ newsSelected.historical_outcome.entry_price }}</p></template>
+          <p v-else class="data-warning">该新闻尚未与足够的后续真实价格完成对齐，不展示虚构收益。</p>
+          <a :href="newsSelected.url" target="_blank">查看原文</a>
+        </div>
+      </el-dialog>
       <footer>
         所有行情来自公开真实数据源；预测和回测不构成投资建议。<span
           >AI行情助手 v{{ appVersion }}</span
