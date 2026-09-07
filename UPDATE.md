@@ -1,6 +1,14 @@
 # AI行情助手自动更新与发布
 
-当前代码版本：**v1.5.1**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+当前代码版本：**v1.6.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+
+## v1.6.0 / V7
+
+- OKX 真实逐笔成交驱动当前蜡烛，一个资产流同步聚合 1m/5m/15m/30m/1h/4h/1D。
+- 指标/结构后台单航班重算，不阻塞 WebSocket；新增实时价线、VWAP、ADX、量比和新闻 K 线标记。
+- 新增 AI Market Intelligence：多 Provider、事件提取、利好利空、影响图谱、板块雷达、关注/风险名单和证据型交易观点。
+- 新增标准化新闻数据库与严格 Point-in-Time 新闻回测；样本不足不展示伪造准确率。
+- A 股休市显示 `MARKET_CLOSED`，数据源不可用时明确报错。
 
 ## v1.5.1 / 模型保存热修复
 

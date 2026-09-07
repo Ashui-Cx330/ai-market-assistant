@@ -19,9 +19,10 @@ from pydantic import BaseModel, Field
 from .ai_engine import feature_frame, predict
 from .backtest import run_backtest
 from .database import (DB_PATH, add_watchlist, connection, execute_paper_order, init_db, list_backtests, list_watchlist,
+                       load_news_intelligence,
                        paper_snapshot, prediction_history, prediction_statistics, remove_watchlist,
                        resolve_prediction_history, save_backtest, save_external_feature_observations,
-                       save_feature_observations, save_prediction_history)
+                       save_feature_observations, save_news_intelligence, save_prediction_history)
 from .indicators import indicator_payload
 from .market import (crypto_derivatives, crypto_kline, crypto_onchain, crypto_quote, crypto_search, event_risk,
                      cross_validate_quote, macro_context, macro_history, news_context, normalize_crypto, stock_fundamental, stock_kline, stock_quote,
@@ -34,6 +35,7 @@ from .strategy_engine import (SIGNAL_KEYS, StrategyEngine, strategy_backtest,
                               strategy_incremental_experiment, walk_forward_strategy,
                               optimize_strategy_parameters, ml_ict_incremental_experiment)
 from .realtime import realtime_manager, utc_now
+from .news_intelligence import build_intelligence, collect_news, event_backtest
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))["version"]
@@ -127,12 +129,19 @@ class PaperOrderRequest(BaseModel):
     amount: float | None = Field(default=None, gt=0)
 
 
+class NewsBacktestRequest(BaseModel):
+    symbol: str
+    asset_type: str
+    interval: str = "1d"
+    event_type: str | None = None
+
+
 @app.get("/api/health")
 def health() -> dict:
     with connection() as conn:
         conn.execute("SELECT 1").fetchone()
     frontend_ready = (DIST / "index.html").exists()
-    return {"status": "ok", "service": "AI行情助手", "phase": "V6 实时行情与动态预测", "version": VERSION,
+    return {"status": "ok", "service": "AI行情助手", "phase": "V7 实时K线与新闻情报", "version": VERSION,
             "desktop": os.environ.get("TRADING_AI_DESKTOP") == "1", "database": "ok",
             "database_path": str(DB_PATH), "frontend": "ok" if frontend_ready else "missing"}
 
@@ -145,6 +154,46 @@ def realtime_time() -> dict:
 @app.get("/api/realtime/snapshot")
 async def realtime_snapshot() -> dict:
     return ok(await realtime_manager.store.snapshots())
+
+
+@app.get("/api/news/providers")
+def news_providers() -> dict:
+    return ok({"providers":["MarketNewsProvider","CompanyNewsProvider","MacroNewsProvider",
+                            "AnnouncementProvider","RSSProvider"],
+               "active_source":"Google News RSS",
+               "nlp_method":"auditable financial event lexicon v1",
+               "finbert_status":"NOT_INSTALLED",
+               "notice":"Provider 接口可替换；当前情感与事件分析是可审计规则，不冒充 FinBERT/LLM。"})
+
+
+@app.get("/api/news/intelligence")
+async def news_intelligence(symbol: str | None = None, asset_type: str = "stock", name: str | None = None,
+                            force_refresh: bool = False) -> dict:
+    normalized = normalize_crypto(symbol) if symbol and asset_type == "crypto" else symbol
+    rows, errors = await collect_news(normalized, name)
+    technical_score = volume_ratio = None
+    if normalized:
+        states = await realtime_manager.store.asset_states(asset_type, normalized)
+        usable = next((state for state in states if state.indicators), None)
+        if usable and usable.indicators:
+            technical_score = usable.indicators.get("score")
+            volume_ratio = usable.indicators.get("latest", {}).get("volume_ratio")
+    result = build_intelligence(rows, normalized, name, technical_score, volume_ratio,
+                                len(load_news_intelligence(normalized)))
+    result["provider_errors"] = errors
+    result["persisted"] = await asyncio.to_thread(save_news_intelligence, result["all_news"], normalized)
+    return ok(result, "真实新闻采集与可审计事件分析完成", source="Google News RSS")
+
+
+@app.post("/api/news/backtest")
+async def news_backtest(body: NewsBacktestRequest) -> dict:
+    symbol = normalize_crypto(body.symbol) if body.asset_type == "crypto" else body.symbol
+    events = load_news_intelligence(symbol)
+    data, source = await _kline(body.asset_type, symbol, body.interval, 1200)
+    result = await asyncio.to_thread(event_backtest, events, data["candles"], body.event_type)
+    result.update({"symbol":symbol,"asset_type":body.asset_type,"interval":body.interval,
+                   "data_source":source,"news_source":"persisted public headlines"})
+    return ok(result, "Point-in-Time 新闻事件回测完成", source=source)
 
 
 @app.websocket("/api/realtime/ws")

@@ -65,9 +65,10 @@ class RealtimeMarketStore {
     if(event.key){
       if(event.type==="snapshot"||event.type==="ticker") this.states[event.key]=event.data;
       else if(event.type==="candle") this.states[event.key]=event.data.state;
+      else if(event.type==="connection")this.states[event.key]={...(this.states[event.key]||{}),connectionStatus:event.data.status,connectionReason:event.data.reason};
       else this.states[event.key]={...(this.states[event.key]||{}),[event.type]:event.data};
     }
-    if(event.type==="connection")this.connectionStatus.value=event.data.status;
+    if(event.type==="connection"&&!event.key)this.connectionStatus.value=event.data.status;
     else if(["ticker","candle","analysis"].includes(event.type)){
       this.connectionStatus.value="CONNECTED";this.lastUpdateTime.value=new Date(received).toLocaleTimeString("zh-CN");
       const data=event.type==="candle"?event.data.state:event.data;

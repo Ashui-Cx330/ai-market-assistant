@@ -73,6 +73,44 @@ def init_db() -> None:
                 feature_timestamp TEXT NOT NULL, asset TEXT NOT NULL, feature_name TEXT NOT NULL,
                 value REAL, source TEXT NOT NULL, quality TEXT NOT NULL, collected_at TEXT NOT NULL,
                 PRIMARY KEY(feature_timestamp,asset,feature_name,source)
+            );
+            CREATE TABLE IF NOT EXISTS news (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, url TEXT NOT NULL, source TEXT,
+                provider TEXT, scope TEXT, published_at TEXT, collected_at TEXT NOT NULL, payload_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS news_events (
+                news_id TEXT PRIMARY KEY, subject TEXT, event_type TEXT, category TEXT, event_time TEXT,
+                direction TEXT, magnitude INTEGER, confidence REAL, payload_json TEXT NOT NULL,
+                FOREIGN KEY(news_id) REFERENCES news(id)
+            );
+            CREATE TABLE IF NOT EXISTS news_sentiment (
+                news_id TEXT PRIMARY KEY, score REAL NOT NULL, direction TEXT NOT NULL, method TEXT NOT NULL,
+                payload_json TEXT NOT NULL, FOREIGN KEY(news_id) REFERENCES news(id)
+            );
+            CREATE TABLE IF NOT EXISTS news_impacts (
+                news_id TEXT PRIMARY KEY, impact_score REAL NOT NULL, payload_json TEXT NOT NULL,
+                FOREIGN KEY(news_id) REFERENCES news(id)
+            );
+            CREATE TABLE IF NOT EXISTS news_stock_relations (
+                news_id TEXT NOT NULL, symbol TEXT NOT NULL, relation TEXT NOT NULL,
+                PRIMARY KEY(news_id,symbol), FOREIGN KEY(news_id) REFERENCES news(id)
+            );
+            CREATE TABLE IF NOT EXISTS news_sector_relations (
+                news_id TEXT NOT NULL, sector TEXT NOT NULL, direction TEXT,
+                PRIMARY KEY(news_id,sector), FOREIGN KEY(news_id) REFERENCES news(id)
+            );
+            CREATE TABLE IF NOT EXISTS historical_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, news_id TEXT NOT NULL, symbol TEXT,
+                event_time TEXT NOT NULL, entry_time TEXT NOT NULL, t1_return REAL, t3_return REAL,
+                t5_return REAL, t20_return REAL, UNIQUE(news_id,symbol)
+            );
+            CREATE TABLE IF NOT EXISTS news_prediction_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, decision_time TEXT NOT NULL,
+                horizon TEXT NOT NULL, payload_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS trading_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, decision_time TEXT NOT NULL,
+                payload_json TEXT NOT NULL
             );"""
         )
         prediction_columns={row[1] for row in conn.execute("PRAGMA table_info(prediction_history)")}
@@ -90,6 +128,48 @@ def init_db() -> None:
                 "INSERT INTO watchlist(symbol, asset_type) VALUES (?, ?)",
                 [("600519", "stock"), ("300750", "stock"), ("BTC", "crypto"), ("ETH", "crypto")],
             )
+
+
+def save_news_intelligence(items: list[dict], symbol: str | None = None) -> int:
+    """Upsert normalized observed news and derived, explicitly-labelled analysis."""
+    saved = 0
+    with connection() as conn:
+        for item in items:
+            payload = json.dumps(item, ensure_ascii=False)
+            conn.execute("""INSERT OR REPLACE INTO news
+                (id,title,url,source,provider,scope,published_at,collected_at,payload_json)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (item["id"], item["title"], item["url"], item.get("source"), item.get("provider"),
+                 item.get("scope"), item.get("published_at"), item.get("collected_at"), payload))
+            event, sentiment, impact = item["event"], item["sentiment"], item["impact"]
+            conn.execute("""INSERT OR REPLACE INTO news_events
+                (news_id,subject,event_type,category,event_time,direction,magnitude,confidence,payload_json)
+                VALUES(?,?,?,?,?,?,?,?,?)""", (item["id"], event.get("subject"), event.get("event_type"),
+                item.get("category"), event.get("event_time"), event.get("direction"), event.get("magnitude"),
+                event.get("confidence"), json.dumps(event, ensure_ascii=False)))
+            conn.execute("INSERT OR REPLACE INTO news_sentiment VALUES(?,?,?,?,?)",
+                         (item["id"], sentiment["score"], sentiment["direction"], sentiment["method"],
+                          json.dumps(sentiment, ensure_ascii=False)))
+            conn.execute("INSERT OR REPLACE INTO news_impacts VALUES(?,?,?)",
+                         (item["id"], impact["score"], json.dumps(impact, ensure_ascii=False)))
+            if symbol:
+                conn.execute("INSERT OR REPLACE INTO news_stock_relations VALUES(?,?,?)",
+                             (item["id"], symbol, "query-target"))
+            for relation in impact.get("secondary", []):
+                conn.execute("INSERT OR REPLACE INTO news_sector_relations VALUES(?,?,?)",
+                             (item["id"], relation["target"], relation["direction"]))
+            saved += 1
+    return saved
+
+
+def load_news_intelligence(symbol: str | None = None, limit: int = 500) -> list[dict]:
+    with connection() as conn:
+        if symbol:
+            rows = conn.execute("""SELECT n.payload_json FROM news n JOIN news_stock_relations r ON r.news_id=n.id
+                WHERE r.symbol=? ORDER BY COALESCE(n.published_at,n.collected_at) DESC LIMIT ?""", (symbol, limit)).fetchall()
+        else:
+            rows = conn.execute("SELECT payload_json FROM news ORDER BY COALESCE(published_at,collected_at) DESC LIMIT ?", (limit,)).fetchall()
+    return [json.loads(row[0]) for row in rows]
 
 
 def list_watchlist() -> list[dict]:

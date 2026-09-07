@@ -47,6 +47,17 @@ def calculate_indicators(candles: list[dict]) -> pd.DataFrame:
     previous = close.shift(1)
     true_range = pd.concat([(high - low), (high - previous).abs(), (low - previous).abs()], axis=1).max(axis=1)
     df["atr"] = true_range.rolling(14).mean()
+    typical = (high + low + close) / 3
+    df["vwap"] = (typical * volume).cumsum() / volume.cumsum().replace(0, np.nan)
+    up_move, down_move = high.diff(), -low.diff()
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
+    atr_wilder = true_range.ewm(alpha=1 / 14, adjust=False).mean().replace(0, np.nan)
+    plus_di = 100 * plus_dm.ewm(alpha=1 / 14, adjust=False).mean() / atr_wilder
+    minus_di = 100 * minus_dm.ewm(alpha=1 / 14, adjust=False).mean() / atr_wilder
+    df["adx"] = (100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)).ewm(alpha=1 / 14, adjust=False).mean()
+    df["volume_ma20"] = volume.rolling(20).mean()
+    df["volume_ratio"] = volume / df["volume_ma20"].replace(0, np.nan)
     direction = np.sign(close.diff()).fillna(0)
     df["obv"] = (direction * volume).cumsum()
     df["volume_change"] = volume.pct_change() * 100
@@ -76,7 +87,8 @@ def indicator_payload(candles: list[dict]) -> dict:
                    "donchian_upper_20","donchian_lower_20"):
         df[column] = extended[column]
     columns = ["ma5", "ma10", "ma20", "ma60", "ema12", "ema26", "macd", "macd_signal", "macd_hist",
-               "rsi", "kdj_k", "kdj_d", "kdj_j", "boll_mid", "boll_upper", "boll_lower", "atr", "obv", "volume_change",
+               "rsi", "kdj_k", "kdj_d", "kdj_j", "boll_mid", "boll_upper", "boll_lower", "atr", "adx", "vwap",
+               "obv", "volume_change", "volume_ma20", "volume_ratio",
                "stoch_k","stoch_d","psar","psar_trend","mfi","momentum","roc","donchian_upper_20","donchian_lower_20"]
     latest = {column: _clean(df.iloc[-1].get(column)) for column in columns}
     series = [{"timestamp": row["timestamp"], **{column: _clean(row.get(column)) for column in columns}}

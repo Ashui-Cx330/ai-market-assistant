@@ -25,6 +25,12 @@ async function run() {
       await page.getByText(/当前已经是最新版本。|更新检查已完成。|暂时无法检查更新/).waitFor({ timeout: 30000 })
     }
     await page.locator('nav button').filter({ hasText: '首页' }).click()
+    await page.locator('nav button').filter({ hasText: '新闻情报' }).click()
+    await page.getByRole('heading', { name: 'AI Market Intelligence' }).waitFor({ timeout: 30000 })
+    await page.getByRole('heading', { name: '今日最重要的 10 条新闻' }).waitFor({ timeout: 60000 })
+    const newsCards = await page.locator('.news-list article').count()
+    if (newsCards < 1) throw new Error('Expected at least one observed public news item')
+    await page.locator('nav button').filter({ hasText: '首页' }).click()
     const search = page.locator('.search input')
     await search.fill('600519')
     await page.getByRole('button', { name: '搜索', exact: true }).click()
@@ -62,7 +68,7 @@ async function run() {
     if (strategyCards !== 30) throw new Error(`Expected 30 strategy cards, found ${strategyCards}`)
     await page.locator('.strategy-card').filter({ hasText: 'Order Flow' }).getByText('ORDER_FLOW_DATA_UNAVAILABLE').waitFor({ timeout: 10000 })
     await page.locator('.strategy-card').filter({ hasText: '期权' }).getByText('OPTIONS_DATA_UNAVAILABLE').waitFor({ timeout: 10000 })
-    console.log(`PASS ${packaged ? 'packaged' : 'development'} home/update/search/stock/chart/backtest/paper/crypto/V5-decision/30-strategy-radar/causal-structure/risk`)
+    console.log(`PASS ${packaged ? 'packaged' : 'development'} home/update/news/search/stock/chart/backtest/paper/crypto/V7-decision/30-strategy-radar/causal-structure/risk`)
     complete = true
   } finally {
     await app.close()

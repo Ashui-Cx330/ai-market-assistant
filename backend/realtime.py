@@ -13,6 +13,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
+from zoneinfo import ZoneInfo
 
 import websockets
 
@@ -41,6 +42,7 @@ class RealtimeRefreshPolicy:
     max_reconnect_seconds: int = 30
     prediction_min_seconds: int = 300
     prediction_price_move: float = .003
+    analysis_min_seconds: float = 1.0
 
 
 @dataclass
@@ -69,6 +71,7 @@ class MarketState:
     last_signal: str | None = None
     last_prediction_at: float = 0.0
     last_prediction_price: float | None = None
+    last_analysis_at: float = 0.0
     seen_trades: deque[str] = field(default_factory=lambda: deque(maxlen=4000))
 
     def snapshot(self) -> dict[str, Any]:
@@ -94,7 +97,14 @@ class RealtimeMarketStore:
         async with self._lock:
             return {key: state.snapshot() for key, state in self._states.items()}
 
+    async def asset_states(self, asset_type: str, symbol: str) -> list[MarketState]:
+        prefix = f"{asset_type}:{symbol.upper()}:"
+        async with self._lock:
+            return [state for key, state in self._states.items() if key.startswith(prefix)]
+
     def health(self, state: MarketState, now: float | None = None) -> str:
+        if state.asset_type == "stock" and not self.stock_market_open():
+            return "MARKET_CLOSED"
         if not state.lastUpdateTime:
             return "CONNECTING"
         base = self.policy.crypto_ticker_seconds if state.asset_type == "crypto" else self.policy.stock_poll_seconds
@@ -106,6 +116,12 @@ class RealtimeMarketStore:
         if age > base * self.policy.warning_multiplier:
             return "WARNING"
         return "CONNECTED"
+
+    @staticmethod
+    def stock_market_open(moment: datetime | None = None) -> bool:
+        local = (moment or datetime.now(timezone.utc)).astimezone(ZoneInfo("Asia/Shanghai"))
+        minute = local.hour * 60 + local.minute
+        return local.weekday() < 5 and (570 <= minute < 690 or 780 <= minute < 900)
 
 
 class BackendEventBus:
@@ -154,6 +170,8 @@ class RealtimeDataManager:
     OKX_BUSINESS = "wss://ws.okx.com:8443/ws/v5/business"
     OKX_BARS = {"1m":"candle1m", "5m":"candle5m", "15m":"candle15m", "30m":"candle30m",
                 "1h":"candle1H", "4h":"candle4H", "1d":"candle1Dutc"}
+    INTERVAL_SECONDS = {"1m":60, "5m":300, "15m":900, "30m":1800,
+                        "1h":3600, "4h":14400, "1d":86400}
 
     def __init__(self) -> None:
         self.policy = RealtimeRefreshPolicy()
@@ -167,6 +185,7 @@ class RealtimeDataManager:
         self._news_seen: dict[str, set[str]] = {}
         self._prediction_callback: Callable[[str,str,str,list[str]],Awaitable[dict[str,Any]]] | None = None
         self._prediction_running: set[str] = set()
+        self._analysis_running: set[str] = set()
 
     def set_prediction_callback(self, callback: Callable[[str,str,str,list[str]],Awaitable[dict[str,Any]]]) -> None:
         self._prediction_callback = callback
@@ -188,6 +207,12 @@ class RealtimeDataManager:
         if interval not in self.OKX_BARS or asset_type not in {"crypto", "stock"}:
             raise ValueError("不支持的实时订阅")
         state = await self.store.get_or_create(asset_type, symbol, interval)
+        # One real trade stream maintains the in-progress candle for every
+        # supported timeframe.  Empty states become useful immediately and are
+        # backfilled when a client actually opens that timeframe.
+        if asset_type == "crypto":
+            await asyncio.gather(*(self.store.get_or_create(asset_type, symbol, item)
+                                   for item in self.OKX_BARS))
         key = self.store.key(asset_type, symbol, interval)
         async with self._subscription_lock:
             if key in self.tasks:
@@ -197,11 +222,13 @@ class RealtimeDataManager:
             self.tasks[key] = []
         await self._bootstrap(state)
         if asset_type == "crypto":
-            self.tasks[key] = [
-                asyncio.create_task(self._okx_public_loop(state), name=f"ticker:{key}"),
-                asyncio.create_task(self._okx_candle_loop(state), name=f"candle:{key}"),
-                asyncio.create_task(self._slow_context_loop(state), name=f"context:{key}"),
-            ]
+            asset_key = f"feed:{asset_type}:{symbol}"
+            shared = []
+            if asset_key not in self.tasks:
+                shared = [asyncio.create_task(self._okx_public_loop(state), name=f"trades:{asset_key}"),
+                          asyncio.create_task(self._slow_context_loop(state), name=f"context:{asset_key}")]
+                self.tasks[asset_key] = shared
+            self.tasks[key] = [asyncio.create_task(self._okx_candle_loop(state), name=f"candle:{key}")]
         else:
             self.tasks[key] = [asyncio.create_task(self._stock_poll_loop(state), name=f"stock:{key}"),
                                asyncio.create_task(self._slow_context_loop(state), name=f"context:{key}")]
@@ -249,7 +276,61 @@ class RealtimeDataManager:
         elif side == "sell": state.order_flow["sell_volume"] += size
         state.order_flow["cumulative_delta"] = state.order_flow["buy_volume"] - state.order_flow["sell_volume"]
         state.order_flow["dataTimestamp"] = datetime.fromtimestamp(int(trade["ts"])/1000, timezone.utc).isoformat()
+        await self.process_tick(state, float(trade["px"]), size, int(trade["ts"]), "OKX trades WebSocket")
         return True
+
+    @classmethod
+    def _bucket_timestamp(cls, timestamp_ms: int, interval: str) -> str:
+        seconds = cls.INTERVAL_SECONDS[interval]
+        bucket = (timestamp_ms // 1000 // seconds) * seconds
+        return datetime.fromtimestamp(bucket, timezone.utc).isoformat()
+
+    async def process_tick(self, state: MarketState, price: float, size: float,
+                           timestamp_ms: int, source: str) -> bool:
+        """Aggregate an observed trade into the live candle; never synthesizes data."""
+        stamp = self._bucket_timestamp(timestamp_ms, state.interval)
+        new_bar = not state.candles or stamp > state.candles[-1]["timestamp"]
+        if state.candles and stamp < state.candles[-1]["timestamp"]:
+            return False
+        if new_bar:
+            if state.candles:
+                state.candles[-1]["confirmed"] = True
+            candle = {"timestamp": stamp, "open": price, "high": price, "low": price,
+                      "close": price, "volume": size, "amount": price * size,
+                      "confirmed": False, "tick_count": 1}
+            state.candles.append(candle)
+        else:
+            candle = state.candles[-1]
+            # Exchange candle snapshots may mark the bar confirmed just before
+            # the first next-period trade arrives; only mutate an open bucket.
+            if candle.get("confirmed"):
+                return False
+            candle["high"] = max(float(candle["high"]), price)
+            candle["low"] = min(float(candle["low"]), price)
+            candle["close"] = price
+            candle["volume"] = float(candle.get("volume") or 0) + size
+            candle["amount"] = float(candle.get("amount") or 0) + price * size
+            candle["tick_count"] = int(candle.get("tick_count") or 0) + 1
+        state.candles = state.candles[-1200:]
+        state.source = source
+        state.dataTimestamp = datetime.fromtimestamp(timestamp_ms / 1000, timezone.utc).isoformat()
+        state.receivedTimestamp = utc_now(); state.lastUpdateTime = time.time(); state.connectionStatus = "CONNECTED"
+        key = self.store.key(state.asset_type,state.symbol,state.interval)
+        if time.time() - state.last_analysis_at >= self.policy.analysis_min_seconds and key not in self._analysis_running:
+            self._analysis_running.add(key)
+            state.last_analysis_at = time.time()
+            asyncio.create_task(self._run_analysis(state, source, new_bar, key), name=f"analysis:{key}")
+        state.processedTimestamp = utc_now(); state.serverTimestamp = utc_now()
+        self.bus.publish({"type":"candle", "key":self.store.key(state.asset_type,state.symbol,state.interval),
+                          "data":{"candle":dict(candle),"newBar":new_bar,"tickDriven":True,
+                                  "state":state.snapshot()}})
+        return True
+
+    async def _run_analysis(self, state: MarketState, source: str, new_bar: bool, key: str) -> None:
+        try:
+            await self._process_analysis(state, source, new_bar)
+        finally:
+            self._analysis_running.discard(key)
 
     async def process_candle(self, state: MarketState, candle: dict[str, Any], source: str) -> bool:
         if not state.candles:
@@ -273,10 +354,15 @@ class RealtimeDataManager:
 
     async def _process_analysis(self, state: MarketState, source: str, new_bar: bool) -> None:
         if len(state.candles) < 60: return
+        state.last_analysis_at = time.time()
         old_structure = self._structure_fingerprint(state.strategy)
-        state.indicators = await asyncio.to_thread(indicator_payload, state.candles)
-        state.strategy = await asyncio.to_thread(StrategyEngine().analyze, state.candles, state.interval, source,
-                                                  None, state.order_flow)
+        # A trade may mutate the live candle while worker threads calculate.
+        # Use one atomic event-loop snapshot so all indicators see identical bars.
+        rows = [dict(candle) for candle in state.candles]
+        order_flow = dict(state.order_flow)
+        state.indicators = await asyncio.to_thread(indicator_payload, rows)
+        state.strategy = await asyncio.to_thread(StrategyEngine().analyze, rows, state.interval, source,
+                                                  None, order_flow)
         is_confirmed = bool(state.candles[-1].get("confirmed"))
         state.strategy["realtime_status"] = "CONFIRMED" if is_confirmed else "UNCONFIRMED"
         for name in ("latest_bos", "latest_choch"):
@@ -339,8 +425,11 @@ class RealtimeDataManager:
                                     "high":float(row["high24h"]),"low":float(row["low24h"]),"volume":float(row["vol24h"]),
                                     "amount":float(row["volCcy24h"]),"bid":float(row["bidPx"] or 0),"ask":float(row["askPx"] or 0),
                                     "source":"OKX ticker WebSocket","updated_at":stamp}
-                                await self.process_ticker(state,quote,stamp,quote["source"])
-                            elif channel == "trades": await self.process_trade(state,row)
+                                for target in await self.store.asset_states(state.asset_type, state.symbol):
+                                    await self.process_ticker(target,dict(quote),stamp,quote["source"])
+                            elif channel == "trades":
+                                for target in await self.store.asset_states(state.asset_type, state.symbol):
+                                    await self.process_trade(target,row)
                             elif channel == "books5":
                                 if state.quote:
                                     state.quote["bid"] = float(row["bids"][0][0]) if row.get("bids") else None
@@ -384,6 +473,11 @@ class RealtimeDataManager:
                 quote,(rows,source)=await asyncio.gather(stock_quote(state.symbol,True),stock_kline(state.symbol,state.interval,500,True))
                 await self.process_ticker(state,quote,quote.get("updated_at"),quote.get("source","A-share provider"))
                 if rows: await self.process_candle(state,rows[-1],source+" 15s incremental polling")
+                if not self.store.stock_market_open():
+                    state.connectionStatus = "MARKET_CLOSED"
+                    self.bus.publish({"type":"connection","key":self.store.key(state.asset_type,state.symbol,state.interval),
+                                      "data":{"status":"MARKET_CLOSED","reason":"当前市场休市，实时行情暂停。",
+                                              "lastUpdateTime":state.lastUpdateTime}})
             except asyncio.CancelledError: raise
             except Exception as exc:
                 state.connectionStatus="WARNING"

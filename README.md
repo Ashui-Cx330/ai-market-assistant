@@ -4,7 +4,7 @@
 
 ## Windows 安装
 
-双击 `outputs\desktop\AI-Market-Assistant-Setup-v1.5.1.exe` 完成安装。桌面会出现“AI行情助手”，以后直接双击即可；无需打开项目目录、Python、Node、Docker 或命令行。
+双击 `outputs\desktop\AI-Market-Assistant-Setup-v1.6.0.exe` 完成安装。桌面会出现“AI行情助手”，以后直接双击即可；无需打开项目目录、Python、Node、Docker 或命令行。
 
 - 程序目录：`%LOCALAPPDATA%\Programs\AI行情助手`
 - 用户数据：`%APPDATA%\AI行情助手`
@@ -25,10 +25,14 @@
 - V4 市场快照、跨资产滚动相关、结构化新闻去重、特征存储、因子消融、预期收益/波动、MAE/MFE、异常检测、失效条件与组合 VaR/CVaR。
 - V5 统一 30 类技术策略，因果 Swing、BOS、CHoCH、三K线 FVG、Fibonacci 组合、去重共振和多周期冲突降权。
 - V6 进程级实时行情管理器：OKX Ticker/Candle/逐笔成交/盘口 WebSocket、A 股 15 秒增量请求、断线指数退避、假死检测、全局前端 Store、实时指标/结构/策略/风险与条件触发预测。
+- V7 真实逐笔成交同时聚合 7 个 K 线周期；当前蜡烛、实时价线、成交量、MA/EMA/VWAP/RSI/MACD/ADX 及 BOS/CHoCH/FVG/Fibonacci 随最新柱重算。
+- AI 新闻情报中心：真实 RSS、多 Provider 抽象、事件/情绪/影响图谱、板块雷达、关注/风险名单、T+1/T+3/T+5 证据估计、个股情报和 Point-in-Time 新闻回测。规则引擎不会冒充 FinBERT 或伪造准确率。
 - 技术策略雷达、K线结构覆盖层、策略排行榜、独立回测、Walk-forward、参数锁定优化和 ICT 特征 ML 消融。
 - MA、MACD、RSI、AI、AI+技术五种历史策略回测，计入手续费和滑点。
 - CNY/USDT 模拟账户、真实当前价模拟买卖、持仓、订单和回测历史。
 - SQLite 自选与用户记录持久化。
+
+V7 的真实数据边界、30 秒 Tick 验收和开源调研见 `NEWS_INTELLIGENCE_AUDIT.md`。
 
 ## 数据源与失败处理
 

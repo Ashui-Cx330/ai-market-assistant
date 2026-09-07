@@ -21,3 +21,12 @@
 
 此前调研过 Freqtrade/FreqAI、Microsoft Qlib 和 FinRL，但当前 v0.3.0 未复制、链接或打包这些项目的代码。
 
+## V7 新闻情报调研（未打包、未复制）
+
+| 项目 | License 核查 | 处理决定 |
+|---|---|---|
+| ProsusAI/finBERT | Apache-2.0 | 仅参考金融情感三分类设计；旧依赖且主要面向英文，本版未引入 |
+| zhaymn/StockIntel | MIT | 仅参考校准门、拒绝预测、PIT 验证与新闻/价格影响分离 |
+| PandOvo/FinNews-Sentiment2Signal | GitHub API 未识别许可证 | 不复制代码或合成示例数据，仅参考 IC/时间对齐研究方向 |
+| overlandflight/PokieTicker_A-main | GitHub API 未识别许可证 | 不复制代码 |
+| valuesimplex/FinBERT | MIT | 中文金融 NLP 候选，当前未引入模型权重或代码 |

@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import {
   DataAnalysis,
+  Bell,
   HomeFilled,
   Refresh,
   Search,
@@ -24,7 +25,7 @@ import {
 } from "./api";
 import { realtimeMarketStore, type RealtimeEvent } from "./realtime";
 
-type Page = "home" | "detail" | "paper" | "watchlist" | "settings";
+type Page = "home" | "detail" | "news" | "paper" | "watchlist" | "settings";
 const page = ref<Page>("home"),
   items = ref<Asset[]>([]),
   appVersion = ref("0.3.0"),
@@ -57,6 +58,10 @@ const marketContext = ref<any>(null),
   accountEquity = ref(100000),
   maxRiskPercent = ref(1),
   leverage = ref(1);
+const newsIntelligence = ref<any>(null),
+  newsLoading = ref(false),
+  newsError = ref(""),
+  newsBacktest = ref<any>(null);
 const orderAmount = ref(1000),
   orderLoading = ref(false),
   watchlist = ref<any[]>([]),
@@ -80,6 +85,8 @@ const inWatchlist = computed(
     ),
 );
 const periods = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
+const selectedLiveState = computed(() => realtimeMarketStore.states[selectedRealtimeKey()] || {});
+const liveStatus = computed(() => selectedLiveState.value.connectionStatus || realtimeMarketStore.connectionStatus.value);
 const v5BacktestStrategies=["breakout","pullback","moving_average","bollinger","rsi_reversal","fibonacci","bos","fvg","fib_fvg_bos"];
 function price(value: number | null | undefined, currency = "") {
   if (value == null) return "—";
@@ -172,8 +179,39 @@ async function openAsset(asset: Asset, action?: "ai" | "backtest") {
   interval.value = asset.asset_type === "crypto" ? "1h" : "1d";
   await Promise.all([loadQuote(), loadKline()]);
   realtimeMarketStore.subscribe(asset.asset_type, asset.symbol, interval.value);
+  void loadNews(asset);
   if (action === "ai") await runAI();
   if (action === "backtest") await nextTick();
+}
+
+async function loadNews(asset?: Asset) {
+  newsLoading.value = true;
+  newsError.value = "";
+  try {
+    const target = asset || (page.value === "detail" ? selected.value || undefined : undefined);
+    const params = target
+      ? `?symbol=${encodeURIComponent(target.symbol)}&asset_type=${target.asset_type}&name=${encodeURIComponent(target.name)}`
+      : "";
+    newsIntelligence.value = await request<any>(`/api/news/intelligence${params}`);
+  } catch (e) {
+    newsError.value = e instanceof Error ? e.message : "新闻数据源暂不可用";
+  } finally {
+    newsLoading.value = false;
+  }
+}
+
+async function showNews() {
+  page.value = "news";
+  await loadNews();
+}
+
+async function runNewsBacktest() {
+  if (!selected.value) return;
+  newsBacktest.value = await post<any>("/api/news/backtest", {
+    symbol: selected.value.symbol,
+    asset_type: selected.value.asset_type,
+    interval: interval.value,
+  }).catch((e) => ({ status: "ERROR", notice: e instanceof Error ? e.message : "回测失败" }));
 }
 async function loadQuote() {
   if (!selected.value) return;
@@ -234,7 +272,7 @@ async function runAI(options?:{silent?:boolean;reasons?:string[]}) {
       probabilities:primary?.probabilities,
     });
     livePredictionHistory.value=livePredictionHistory.value.slice(0,20);
-    if(!options?.silent) ElMessage.success("V6 实时因果策略与交易决策完成");
+    if(!options?.silent) ElMessage.success("V7 实时因果策略与交易决策完成");
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : "AI预测失败");
   } finally {
@@ -414,7 +452,7 @@ async function checkUpdates() {
 }
 function nav(
   target:
-    "home" | "market" | "ai" | "backtest" | "paper" | "watchlist" | "settings",
+    "home" | "market" | "ai" | "backtest" | "news" | "paper" | "watchlist" | "settings",
 ) {
   if (target === "home") {
     page.value = "home";
@@ -425,6 +463,7 @@ function nav(
       document.querySelector<HTMLInputElement>(".search input")?.focus(),
     );
   } else if (target === "paper") showPaper();
+  else if (target === "news") showNews();
   else if (target === "watchlist") showWatchlist();
   else if (target === "settings") page.value = "settings";
   else
@@ -453,6 +492,9 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
         </button>
         <button @click="nav('ai')">
           <el-icon><DataAnalysis /></el-icon>AI 预测
+        </button>
+        <button :class="{ active: page === 'news' }" @click="nav('news')">
+          <el-icon><Bell /></el-icon>新闻情报
         </button>
         <button @click="nav('backtest')">
           <el-icon><Wallet /></el-icon>回测
@@ -489,6 +531,8 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
                   : "资产详情"
                 : page === "paper"
                   ? "模拟交易账户"
+                  : page === "news"
+                    ? "AI Market Intelligence"
                   : page === "watchlist"
                     ? "我的自选"
                     : page === "settings"
@@ -502,6 +546,8 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
                 ? "真实行情、指标、模型、回测与模拟交易"
                 : page === "home"
                   ? "真实公开行情 · 数据源故障自动切换"
+                  : page === "news"
+                    ? "真实新闻 · 事件影响 · 交易决策辅助"
                   : page === "settings"
                     ? "版本、更新状态与用户数据位置"
                     : "数据持久化保存在本机"
@@ -514,6 +560,8 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
           @click="
             page === 'home'
               ? loadHome()
+              : page === 'news'
+                ? loadNews()
               : page === 'paper'
                 ? loadPaper()
                 : page === 'detail'
@@ -691,6 +739,45 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
         </section></template
       >
 
+      <template v-else-if="page === 'news'">
+        <el-alert v-if="newsError" :title="newsError" type="error" show-icon :closable="false">
+          <button @click="loadNews()">重试</button>
+        </el-alert>
+        <div v-if="newsLoading" class="loading-box">正在采集真实公开新闻并执行事件分析…</div>
+        <template v-else-if="newsIntelligence">
+          <section class="panel intelligence-hero">
+            <div><span class="eyebrow">TODAY'S MARKET RADAR</span><h2>{{ newsIntelligence.radar.market_sentiment }}</h2><p>市场新闻情绪分（-100 ~ +100）</p></div>
+            <div class="news-radar">
+              <article><b class="positive">{{ newsIntelligence.radar.positive }}</b><span>利好</span></article>
+              <article><b class="negative">{{ newsIntelligence.radar.negative }}</b><span>利空</span></article>
+              <article><b>{{ newsIntelligence.radar.neutral }}</b><span>中性</span></article>
+              <article><b>{{ newsIntelligence.radar.major }}</b><span>重大事件</span></article>
+            </div>
+          </section>
+          <section class="two-col">
+            <div class="panel"><div class="panel-top"><h3>AI 综合观点</h3><span class="score">置信等级 {{ newsIntelligence.decision.confidence_grade }}</span></div>
+              <h2>{{ newsIntelligence.decision.view }}</h2>
+              <div class="decision-bars"><span>BUY {{ newsIntelligence.decision.scores.buy }}</span><span>HOLD {{ newsIntelligence.decision.scores.hold }}</span><span>AVOID {{ newsIntelligence.decision.scores.avoid }}</span></div>
+              <p class="data-warning">{{ newsIntelligence.decision.notice }}</p>
+            </div>
+            <div class="panel"><h3>T+1 / T+3 / T+5 证据估计</h3><div class="level-list"><div v-for="(value,key) in newsIntelligence.predictions" :key="key"><b>{{ key }} · 上涨 {{ value.up }}% · 震荡 {{ value.flat }}% · 下跌 {{ value.down }}%</b><span>{{ value.type }} · 已验证样本 {{ value.validated_samples }}</span></div></div></div>
+          </section>
+          <section class="two-col">
+            <div class="panel"><h3>利好板块</h3><div class="tag-list"><span v-for="(value,key) in newsIntelligence.sector_impact" :key="key" v-show="value.score > 0">{{ key }} +{{ value.score }}</span></div></div>
+            <div class="panel"><h3>风险板块</h3><div class="tag-list risk-tags"><span v-for="(value,key) in newsIntelligence.sector_impact" :key="key" v-show="value.score < 0">{{ key }} {{ value.score }}</span></div></div>
+          </section>
+          <section class="panel"><div class="panel-top"><div><h3>今日最重要的 10 条新闻</h3><p>按事件影响分排序，不按发布时间冒充重要性</p></div><small>{{ newsIntelligence.method }}</small></div>
+            <div class="news-list"><article v-for="item in newsIntelligence.top_news" :key="item.id">
+              <div class="news-score" :class="item.sentiment.score >= 10 ? 'positive' : item.sentiment.score <= -10 ? 'negative' : ''">{{ item.sentiment.score > 0 ? '+' : '' }}{{ item.sentiment.score }}</div>
+              <div><a :href="item.url" target="_blank">{{ item.title }}</a><p>{{ item.category }} · {{ item.event.event_type }} · 影响 {{ item.impact.score }} · {{ item.source }}</p><small>{{ item.published_at?.replace('T',' ').slice(0,19) || '发布时间未知（禁止进入回测）' }}</small>
+                <details><summary>事件影响图谱</summary><p v-for="impact in [...item.impact.primary,...item.impact.secondary,...item.impact.counter]" :key="impact.target"><b>{{ impact.target }} · {{ impact.direction }}</b> — {{ impact.reason }}</p></details>
+              </div>
+            </article></div>
+          </section>
+          <p class="data-warning">Point-in-Time：{{ newsIntelligence.point_in_time }} · 数据源异常数 {{ newsIntelligence.provider_errors?.length || 0 }}</p>
+        </template>
+      </template>
+
       <template v-else-if="page === 'detail'"
         ><el-alert
           v-if="detailError"
@@ -724,10 +811,11 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
               {{ quote?.source || "正在连接数据源" }} ·
               {{ quote?.updated_at?.replace("T", " ").slice(0, 19) }}
             </p>
-            <div :class="['realtime-status', realtimeMarketStore.connectionStatus.value.toLowerCase()]">
-              <i></i>{{ realtimeMarketStore.connectionStatus.value }}
-              <span>最后更新 {{ realtimeMarketStore.lastUpdateTime.value || '等待数据' }}</span>
-              <span v-if="realtimeMarketStore.latencyMs.value!=null">延迟 {{ realtimeMarketStore.latencyMs.value }}ms</span>
+            <div :class="['realtime-status', liveStatus.toLowerCase()]">
+              <i></i>{{ liveStatus === 'MARKET_CLOSED' ? '当前市场休市，实时行情暂停' : liveStatus }}
+              <span>数据源 {{ selectedLiveState.source || quote?.source || '等待连接' }}</span>
+              <span>最后更新 {{ selectedLiveState.processedTimestamp?.replace('T',' ').slice(11,19) || realtimeMarketStore.lastUpdateTime.value || '等待数据' }}</span>
+              <span v-if="selectedLiveState.latencyMs!=null">延迟 {{ selectedLiveState.latencyMs }}ms</span>
             </div>
           </div>
           <div class="head-actions">
@@ -779,7 +867,14 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
           <div v-if="detailLoading" class="loading-box">
             正在获取 {{ interval.toUpperCase() }} 真实 K线…
           </div>
-          <KlineChart v-else :candles="candles" :indicators="indicators" :structure="aiResult?.decision_center?.technical_strategy" />
+          <KlineChart v-else :candles="candles" :indicators="indicators" :structure="aiResult?.decision_center?.technical_strategy" :news="newsIntelligence?.top_news || []" />
+        </section>
+        <section v-if="newsIntelligence" class="panel">
+          <div class="panel-top"><div><h3>个股 / 币种 AI 情报</h3><p>新闻 → 事件 → 影响 → 技术面融合</p></div><button @click="runNewsBacktest">新闻策略回测</button></div>
+          <div class="decision-bars"><span>BUY {{ newsIntelligence.decision.scores.buy }}</span><span>HOLD {{ newsIntelligence.decision.scores.hold }}</span><span>AVOID {{ newsIntelligence.decision.scores.avoid }}</span></div>
+          <h3>{{ newsIntelligence.decision.view }}</h3>
+          <div class="news-list compact-news"><article v-for="item in newsIntelligence.top_news.slice(0,5)" :key="item.id"><div class="news-score" :class="item.sentiment.score >= 10 ? 'positive' : item.sentiment.score <= -10 ? 'negative' : ''">{{ item.sentiment.score }}</div><div><a :href="item.url" target="_blank">{{ item.title }}</a><p>{{ item.event.direction }} · {{ item.event.event_type }} · 影响 {{ item.impact.score }}</p></div></article></div>
+          <p v-if="newsBacktest" class="data-warning">新闻回测：{{ newsBacktest.status }} · 样本 {{ newsBacktest.samples }} · {{ newsBacktest.notice || `T+5 胜率 ${probability(newsBacktest.win_rate_t5)}` }}</p>
         </section>
         <section v-if="indicators" class="panel">
           <div class="panel-top">
