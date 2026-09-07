@@ -4,6 +4,20 @@ $productName = 'AI' + [char]0x884C + [char]0x60C5 + [char]0x52A9 + [char]0x624B
 $serviceName = $productName + [char]0x670D + [char]0x52A1
 Set-Location $root
 
+# electron-builder only emits fresh latest.yml when a publish provider exists.
+# Resolve it automatically so direct builds cannot accidentally leave metadata
+# from an older release in the output directory.
+if (-not $env:GH_OWNER -or -not $env:GH_REPO) {
+  $gh = Get-Command gh -ErrorAction SilentlyContinue
+  $remote = (& git remote get-url origin 2>$null)
+  if ($gh -and $remote -match 'github\.com[/:]([^/]+)/([^/]+?)(?:\.git)?$') {
+    $env:GH_OWNER = $Matches[1]
+    $env:GH_REPO = $Matches[2]
+  } else {
+    throw 'Cannot determine GH_OWNER/GH_REPO; refusing to generate potentially stale update metadata.'
+  }
+}
+
 Write-Output '[1/5] Building Vue production assets'
 npm --prefix frontend run build
 if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed' }

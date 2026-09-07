@@ -807,6 +807,13 @@ footer {
 .signal-dot.positive { background: #22c997; box-shadow: 0 0 8px #22c99788; }
 .signal-dot.negative { background: #f15b72; box-shadow: 0 0 8px #f15b7288; }
 .neutral { color: #8ba0b4; }
+.realtime-status { display:flex;align-items:center;gap:8px;margin-top:8px;color:#8ba0b4;font-size:11px; }
+.realtime-status i { width:8px;height:8px;border-radius:50%;background:#f5b942;box-shadow:0 0 8px #f5b94288; }
+.realtime-status.connected i { background:#22c997;box-shadow:0 0 8px #22c99788; }
+.realtime-status.disconnected i,.realtime-status.stale i { background:#f15b72;box-shadow:0 0 8px #f15b7288; }
+.live-history { display:grid;gap:8px; }
+.live-history article { display:grid;grid-template-columns:80px 170px 1fr;gap:10px;padding:10px 12px;background:#102536;border-radius:9px; }
+.live-history small,.live-history span { color:#8ba0b4; }
 .strategy-meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 7px 0; }
 .structure-summary {
   display: grid;

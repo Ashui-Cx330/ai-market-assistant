@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 
 import pandas as pd
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -33,6 +33,7 @@ from .v4_research import PortfolioRiskEngine, build_research_layer
 from .strategy_engine import (SIGNAL_KEYS, StrategyEngine, strategy_backtest,
                               strategy_incremental_experiment, walk_forward_strategy,
                               optimize_strategy_parameters, ml_ict_incremental_experiment)
+from .realtime import realtime_manager, utc_now
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))["version"]
@@ -41,7 +42,11 @@ VERSION = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))["versi
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
-    yield
+    await realtime_manager.start()
+    try:
+        yield
+    finally:
+        await realtime_manager.stop()
 
 
 app = FastAPI(title="AI行情助手", version=VERSION, docs_url="/api/docs", lifespan=lifespan)
@@ -127,9 +132,53 @@ def health() -> dict:
     with connection() as conn:
         conn.execute("SELECT 1").fetchone()
     frontend_ready = (DIST / "index.html").exists()
-    return {"status": "ok", "service": "AI行情助手", "phase": "V5 因果技术策略引擎", "version": VERSION,
+    return {"status": "ok", "service": "AI行情助手", "phase": "V6 实时行情与动态预测", "version": VERSION,
             "desktop": os.environ.get("TRADING_AI_DESKTOP") == "1", "database": "ok",
             "database_path": str(DB_PATH), "frontend": "ok" if frontend_ready else "missing"}
+
+
+@app.get("/api/realtime/time")
+def realtime_time() -> dict:
+    return ok({"serverTimestamp": utc_now()})
+
+
+@app.get("/api/realtime/snapshot")
+async def realtime_snapshot() -> dict:
+    return ok(await realtime_manager.store.snapshots())
+
+
+@app.websocket("/api/realtime/ws")
+async def realtime_websocket(websocket: WebSocket) -> None:
+    await websocket.accept()
+    queue = realtime_manager.bus.subscribe()
+
+    async def forward() -> None:
+        while True:
+            await websocket.send_json(await queue.get())
+
+    async def receive() -> None:
+        await websocket.send_json({"type":"hello","data":{"status":"CONNECTED","serverTimestamp":utc_now()}})
+        while True:
+            message = await websocket.receive_json()
+            if message.get("action") == "subscribe":
+                state = await realtime_manager.subscribe(str(message.get("asset_type")), str(message.get("symbol")),
+                                                         str(message.get("interval") or "1m"))
+                await websocket.send_json({"type":"snapshot","key":realtime_manager.store.key(state.asset_type,state.symbol,state.interval),
+                                           "data":state.snapshot(),"serverTimestamp":utc_now()})
+            elif message.get("action") == "ping":
+                await websocket.send_json({"type":"pong","data":{"serverTimestamp":utc_now()}})
+    sender=asyncio.create_task(forward());receiver=asyncio.create_task(receive())
+    try:
+        done,pending=await asyncio.wait({sender,receiver},return_when=asyncio.FIRST_COMPLETED)
+        for task in pending: task.cancel()
+        await asyncio.gather(*pending,return_exceptions=True)
+        for task in done:
+            error=task.exception()
+            if error and not isinstance(error,WebSocketDisconnect): raise error
+    except WebSocketDisconnect:
+        pass
+    finally:
+        realtime_manager.bus.unsubscribe(queue)
 
 
 @app.get("/api/market/overview")
@@ -278,6 +327,15 @@ async def api_predict(body: PredictionRequest) -> dict:
     saved = await asyncio.to_thread(save_prediction_history, symbol, body.asset_type, body.interval, result, decision)
     result["decision_center"] = decision; result["history"] = {"resolved":resolved,"saved":saved}
     return ok(result, message="V5 因果技术策略、量化研究审计与交易决策完成", source=source)
+
+
+async def _realtime_prediction(symbol: str, asset_type: str, interval: str, reasons: list[str]) -> dict:
+    result = await api_predict(PredictionRequest(symbol=symbol,asset_type=asset_type,interval=interval))
+    result["realtime"] = {"mode":"LIVE","trigger_reasons":reasons,"generated_at":utc_now()}
+    return result
+
+
+realtime_manager.set_prediction_callback(_realtime_prediction)
 
 
 async def _cross_asset_history(asset_type: str, interval: str, symbol: str, current: list[dict]) -> dict[str,list[dict]]:

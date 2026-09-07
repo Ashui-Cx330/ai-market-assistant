@@ -1,7 +1,7 @@
 {
   "name": "ai-market-assistant-desktop",
   "productName": "AI行情助手",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "author": "AI行情助手 Project",
   "description": "本地 AI 股票与加密货币行情研究平台",
@@ -25,16 +25,41 @@
     "appId": "com.tradingai.marketassistant",
     "productName": "AI行情助手",
     "asar": true,
-    "asarUnpack": ["rollback-guard.ps1"],
-    "directories": { "output": "../outputs/desktop" },
-    "artifactName": "AI-Market-Assistant-Setup-v${version}.${ext}",
-    "files": ["main.cjs", "preload.cjs", "updater.cjs", "update-policy.cjs", "update-state.cjs", "rollback-guard.ps1", "assets/**/*", "package.json"],
-    "extraResources": [
-      {"from": "../backend-dist/AI行情助手服务.exe", "to": "backend/AI行情助手服务.exe"},
-      {"from": "../frontend/dist", "to": "app/frontend/dist"},
-      {"from": "../version.json", "to": "app/version.json"}
+    "asarUnpack": [
+      "rollback-guard.ps1"
     ],
-    "win": {"target": "nsis", "icon": "assets/app-icon.ico"},
+    "directories": {
+      "output": "../outputs/desktop"
+    },
+    "artifactName": "AI-Market-Assistant-Setup-v${version}.${ext}",
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "updater.cjs",
+      "update-policy.cjs",
+      "update-state.cjs",
+      "rollback-guard.ps1",
+      "assets/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend-dist/AI行情助手服务.exe",
+        "to": "backend/AI行情助手服务.exe"
+      },
+      {
+        "from": "../frontend/dist",
+        "to": "app/frontend/dist"
+      },
+      {
+        "from": "../version.json",
+        "to": "app/version.json"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/app-icon.ico"
+    },
     "nsis": {
       "oneClick": true,
       "perMachine": false,
