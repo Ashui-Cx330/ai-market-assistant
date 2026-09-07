@@ -1,6 +1,14 @@
 # AI行情助手自动更新与发布
 
-当前代码版本：**v1.3.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+当前代码版本：**v1.4.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+
+## v1.4.0 / V5
+
+- 统一 30 类因果技术策略与信息家族去重共振。
+- 新增因果 Swing、BOS、CHoCH、三K线 FVG、Fibonacci 及组合策略。
+- 新增技术策略雷达、真实结构图覆盖层、策略排行榜和实验 API。
+- 新增策略 Walk-forward、参数锁定优化、ICT 特征 ML 消融、ECE/reliability。
+- Order Flow、期权和历史新闻缺数据时明确禁用，绝不生成替代数据。
 
 ## 当前实现
 

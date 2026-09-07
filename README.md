@@ -4,7 +4,7 @@
 
 ## Windows 安装
 
-双击 `outputs\desktop\AI-Market-Assistant-Setup-v1.3.0.exe` 完成安装。桌面会出现“AI行情助手”，以后直接双击即可；无需打开项目目录、Python、Node、Docker 或命令行。
+双击 `outputs\desktop\AI-Market-Assistant-Setup-v1.4.0.exe` 完成安装。桌面会出现“AI行情助手”，以后直接双击即可；无需打开项目目录、Python、Node、Docker 或命令行。
 
 - 程序目录：`%LOCALAPPDATA%\Programs\AI行情助手`
 - 用户数据：`%APPDATA%\AI行情助手`
@@ -23,6 +23,8 @@
 - 数学支撑压力区、强度、突破概率、历史优化动态止损、三档止盈、仓位、R:R、期望值和 NO_TRADE 决策。
 - 预测历史自动落库，到期后使用真实 K 线核验 Accuracy/F1/Brier/LogLoss、止损/止盈命中率、Average R 和 Profit Factor。
 - V4 市场快照、跨资产滚动相关、结构化新闻去重、特征存储、因子消融、预期收益/波动、MAE/MFE、异常检测、失效条件与组合 VaR/CVaR。
+- V5 统一 30 类技术策略，因果 Swing、BOS、CHoCH、三K线 FVG、Fibonacci 组合、去重共振和多周期冲突降权。
+- 技术策略雷达、K线结构覆盖层、策略排行榜、独立回测、Walk-forward、参数锁定优化和 ICT 特征 ML 消融。
 - MA、MACD、RSI、AI、AI+技术五种历史策略回测，计入手续费和滑点。
 - CNY/USDT 模拟账户、真实当前价模拟买卖、持仓、订单和回测历史。
 - SQLite 自选与用户记录持久化。
@@ -31,7 +33,7 @@
 
 - A 股：东方财富，日内失败时切换新浪财经，日线失败时切换腾讯证券。
 - 加密货币：OKX，失败时切换 Coinbase；首页还支持 Binance 源。
-- 请求使用 SQLite TTL 原始数据缓存并标注数据源，最终预测不缓存。全部数据源失败时返回明确错误，页面提供重试，不伪造价格。V4 的能力边界与审计结果见 `AI_RESEARCH_V4.md`。
+- 请求使用 SQLite TTL 原始数据缓存并标注数据源，最终预测不缓存。全部数据源失败时返回明确错误，页面提供重试，不伪造价格。V5 的升级前后边界见 `TECHNICAL_STRATEGY_AUDIT.md` 和 `FINAL_TRADING_STRATEGY_AUDIT.md`。
 
 ## 开发与测试
 

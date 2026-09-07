@@ -62,6 +62,12 @@ def test_complete_real_data_chain():
         assert research["feature_ablation"]["status"] == "AVAILABLE"
         assert research["cross_asset"]["status"] in {"AVAILABLE","DATA_INSUFFICIENT"}
         assert 0 <= research["data_quality"]["score"] <= 100
+        technical=prediction["decision_center"]["technical_strategy"]
+        assert technical["strategy_count"]==30 and len(technical["signals"])==30
+        assert technical["unavailable"]["order_flow"]=="ORDER_FLOW_DATA_UNAVAILABLE"
+        assert technical["unavailable"]["options"]=="OPTIONS_DATA_UNAVAILABLE"
+        assert technical["strategy_correlation"]["status"]=="AVAILABLE"
+        assert prediction["decision_center"]["v5_final_decision"]["action"] in {"BUY","SELL","HOLD","WATCH"}
 
         for strategy in ("ma", "macd", "rsi", "ai", "ai_technical"):
             result = assert_ok(client.post("/api/backtest/run", json={"symbol": "BTC", "asset_type": "crypto", "interval": "1h", "strategy": strategy, "initial_cash": 10000, "limit": 300}))

@@ -20,13 +20,15 @@ from .model_manager import ModelManager
 
 CLASSES = np.array([-1, 0, 1])
 FEATURES = ["return_1", "return_3", "return_5", "rsi", "macd", "macd_signal", "atr", "volume_change",
-            "volatility", "ma5_gap", "ma20_gap", "boll_position", "flow_pressure", "sentiment_score"]
+            "volatility", "ma5_gap", "ma20_gap", "boll_position", "flow_pressure", "sentiment_score",
+            "causal_bos", "fvg_imbalance", "fib_0618_distance"]
 FEATURE_LABELS = {
     "return_1": "短期价格动量", "return_3": "3 周期动量", "return_5": "5 周期动量",
     "rsi": "RSI 强弱", "macd": "MACD 趋势", "macd_signal": "MACD 信号线", "atr": "ATR 波动",
     "volume_change": "成交量变化", "volatility": "历史波动率", "ma5_gap": "价格与 MA5 偏离",
     "ma20_gap": "价格与 MA20 偏离", "boll_position": "布林带位置",
     "flow_pressure": "量价资金压力", "sentiment_score": "市场情绪得分",
+    "causal_bos": "因果结构突破", "fvg_imbalance": "三K线FVG方向", "fib_0618_distance": "因果Swing 0.618距离",
 }
 
 
@@ -37,7 +39,37 @@ def feature_frame(candles: list[dict]) -> pd.DataFrame:
     frame["ma20_gap"] = frame["close"] / frame["ma20"] - 1
     width = (frame["boll_upper"] - frame["boll_lower"]).replace(0, np.nan)
     frame["boll_position"] = (frame["close"] - frame["boll_lower"]) / width
+    structure = _causal_structure_features(frame)
+    for column in structure:
+        frame[column] = structure[column]
     return FeatureStore().enrich(frame).replace([np.inf, -np.inf], np.nan)
+
+
+def _causal_structure_features(frame: pd.DataFrame, left: int = 3, right: int = 3) -> pd.DataFrame:
+    """Features known at each row; a pivot is published only after right bars."""
+    bos = np.zeros(len(frame)); fib_distance = np.full(len(frame), np.nan)
+    fvg = np.where(frame["high"].shift(2) < frame["low"], 1.0,
+                   np.where(frame["low"].shift(2) > frame["high"], -1.0, 0.0))
+    last_high = last_low = None; previous_close = None
+    for available in range(len(frame)):
+        pivot = available - right
+        if pivot >= left:
+            hi = float(frame["high"].iloc[pivot]); lo = float(frame["low"].iloc[pivot])
+            if hi > frame["high"].iloc[pivot-left:pivot].max() and hi >= frame["high"].iloc[pivot+1:available+1].max():
+                last_high = (pivot, hi)
+            if lo < frame["low"].iloc[pivot-left:pivot].min() and lo <= frame["low"].iloc[pivot+1:available+1].min():
+                last_low = (pivot, lo)
+        close = float(frame["close"].iloc[available])
+        if previous_close is not None:
+            if last_high and previous_close <= last_high[1] < close: bos[available] = 1
+            elif last_low and previous_close >= last_low[1] > close: bos[available] = -1
+        if last_high and last_low and last_high[1] > last_low[1]:
+            span = last_high[1] - last_low[1]
+            level = (last_high[1] - .618 * span) if last_high[0] > last_low[0] else (last_low[1] + .618 * span)
+            atr = float(frame["atr"].iloc[available]) if pd.notna(frame["atr"].iloc[available]) else np.nan
+            fib_distance[available] = (close - level) / atr if atr and np.isfinite(atr) else np.nan
+        previous_close = close
+    return pd.DataFrame({"causal_bos": bos, "fvg_imbalance": fvg, "fib_0618_distance": fib_distance}, index=frame.index)
 
 
 def _asset_profile(asset_type: str, symbol: str, frame: pd.DataFrame) -> dict:
@@ -168,11 +200,28 @@ def _metrics(y_true, probabilities: np.ndarray) -> dict:
         "log_loss": log_loss(y_true, probabilities, labels=CLASSES),
         "brier_score": float(np.mean(np.sum((probabilities - one_hot) ** 2, axis=1))),
     }
+    confidence = probabilities.max(axis=1)
+    correct = (predicted == np.asarray(y_true)).astype(float)
+    ece = 0.0
+    reliability = []
+    for lower in np.linspace(0, 1, 11)[:-1]:
+        upper = lower + .1
+        mask = (confidence >= lower) & (confidence < upper if upper < 1 else confidence <= upper)
+        if not mask.any():
+            continue
+        observed = float(correct[mask].mean()); predicted_confidence = float(confidence[mask].mean())
+        ece += float(mask.mean()) * abs(observed - predicted_confidence)
+        reliability.append({"lower": round(float(lower), 1), "upper": round(float(upper), 1),
+                            "samples": int(mask.sum()), "predicted": round(predicted_confidence, 4),
+                            "observed": round(observed, 4)})
+    result["ece"] = ece
     try:
         result["auc_ovr"] = (roc_auc_score(one_hot, probabilities, average="macro", multi_class="ovr")
                              if len(set(np.asarray(y_true).tolist())) == 3 else None)
     except ValueError: result["auc_ovr"] = None
-    return {key: None if value is None else round(float(value), 4) for key, value in result.items()}
+    output = {key: None if value is None else round(float(value), 4) for key, value in result.items()}
+    output["reliability"] = reliability
+    return output
 
 
 def _performance_weight(metrics: dict) -> float:
@@ -319,7 +368,7 @@ def _fingerprint(frame: pd.DataFrame, interval: str, horizon: str, profile: str)
     latest = pd.Timestamp(frame["timestamp_utc"].iloc[-1])
     refresh = "1h" if interval in {"1m", "5m"} else "4h" if interval != "1d" else "1d"
     training_bucket = latest.floor(refresh)
-    value = f"v4.0-purged-regime|{profile}|{interval}|{horizon}|{training_bucket}"
+    value = f"v5.0-causal-structure-purged-regime|{profile}|{interval}|{horizon}|{training_bucket}"
     return hashlib.sha256(value.encode()).hexdigest()
 
 
@@ -421,7 +470,7 @@ def predict(candles: list[dict], interval: str = "1h", asset_type: str = "crypto
             "promotion_decision":artifact.get("promotion_decision","LOADED_CURRENT_MODEL"),
         }
     if not any(item.get("prediction") for item in predictions.values()): raise ValueError("所有严格时间目标的样本均不足")
-    return {"engine_version":"4.0", "model":{"name":"PerformanceWeightedEnsemble","models":sorted(all_models),
+    return {"engine_version":"5.0", "model":{"name":"PerformanceWeightedEnsemble","models":sorted(all_models),
              "asset_profile":asset_profile,
              "training_status":"retrained" if any_retrained else "loaded_from_disk", "split":"Purged Train / Calibration / Validation / untouched Test + horizon embargo",
              "walk_forward":True, "purged_cv":True, "embargo":True}, "predictions":predictions, "feature_availability":availability,

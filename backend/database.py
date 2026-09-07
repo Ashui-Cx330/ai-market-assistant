@@ -78,7 +78,8 @@ def init_db() -> None:
         prediction_columns={row[1] for row in conn.execute("PRAGMA table_info(prediction_history)")}
         migrations={"prediction_id":"TEXT","model_version":"TEXT","feature_version":"TEXT","risk_reward":"REAL",
                     "expected_value":"REAL","data_quality":"REAL","status":"TEXT DEFAULT 'ACTIVE'",
-                    "mae":"REAL","mfe":"REAL","expired_at":"TEXT","invalidation_reason":"TEXT"}
+                    "mae":"REAL","mfe":"REAL","expired_at":"TEXT","invalidation_reason":"TEXT",
+                    "strategy_version":"TEXT","tp2":"REAL","probability_calibration":"TEXT"}
         for name,sql_type in migrations.items():
             if name not in prediction_columns:conn.execute(f"ALTER TABLE prediction_history ADD COLUMN {name} {sql_type}")
         conn.executemany("INSERT OR IGNORE INTO paper_accounts(currency,cash,initial_cash) VALUES(?,?,?)",
@@ -185,17 +186,22 @@ def save_prediction_history(symbol: str, asset_type: str, interval: str, predict
             probs = item["probabilities"]
             research=decision.get("research",{});quality=research.get("data_quality",{}).get("score")
             rr=decision.get("risk_reward",{}).get("tp2");ev=decision.get("expected_value",{}).get("percent")
+            technical=decision.get("technical_strategy",{});technical_risk=technical.get("risk_plan",{})
+            technical_targets=technical_risk.get("take_profits",[])
+            tp2=technical_targets[1].get("price") if len(technical_targets)>1 else None
             cursor = conn.execute(
                 """INSERT OR IGNORE INTO prediction_history(
                    symbol,asset_type,interval,horizon,prediction_time,target_time,entry_price,prediction,
                    prob_down,prob_flat,prob_up,threshold,regime,decision,stop_loss,tp1,payload_json,
-                   prediction_id,model_version,feature_version,risk_reward,expected_value,data_quality,status)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   prediction_id,model_version,feature_version,risk_reward,expected_value,data_quality,status,
+                   strategy_version,tp2,probability_calibration)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (symbol, asset_type, interval, horizon, item["prediction_time"], item["future_timestamp"],
                  decision["support_resistance"]["current_price"], item["prediction"], probs["down"], probs["flat"], probs["up"],
                  item["threshold_percent"] / 100, decision["market_regime"]["primary"], decision["decision"]["action"],
                  decision["risk_plan"]["stop_loss"], decision["take_profits"][0]["price"], json.dumps({"prediction":item,"decision":decision}, ensure_ascii=False),
-                 str(uuid.uuid4()),prediction.get("engine_version"),decision.get("feature_version"),rr,ev,quality,"ACTIVE"))
+                 str(uuid.uuid4()),prediction.get("engine_version"),decision.get("feature_version"),rr,ev,quality,"ACTIVE",
+                 technical.get("engine_version"),tp2,"PLATT_SCALING"))
             saved += int(cursor.rowcount > 0)
     return saved
 
@@ -254,9 +260,15 @@ def prediction_statistics() -> dict:
             p=tp/max(tp+fp,1);r=tp/max(tp+fn,1);precision.append(p);recall.append(r);f1.append(2*p*r/max(p+r,1e-12))
         one=np.eye(3)[y]; brier=float(np.mean(np.sum((probs-one)**2,axis=1))); loss=float(-np.mean(np.log(np.clip(probs[np.arange(len(y)),y],1e-12,1))))
         rs=[x["realized_r"] for x in items if x["realized_r"] is not None]; wins=sum(v for v in rs if v>0); losses=abs(sum(v for v in rs if v<0))
+        confidence=probs.max(axis=1);correct=(pred==y).astype(float);ece=0.0;reliability=[]
+        for lower in np.linspace(0,1,11)[:-1]:
+            upper=lower+.1;mask=(confidence>=lower)&(confidence<(upper if upper<1 else upper+1e-12))
+            if not mask.any():continue
+            predicted_conf=float(confidence[mask].mean());observed=float(correct[mask].mean());ece+=float(mask.mean())*abs(predicted_conf-observed)
+            reliability.append({"lower":round(float(lower),1),"upper":round(float(upper),1),"samples":int(mask.sum()),"predicted":round(predicted_conf,4),"observed":round(observed,4)})
         return {"samples":len(items),"accuracy":round(float((pred==y).mean()),4),"precision_macro":round(float(np.mean(precision)),4),
                 "recall_macro":round(float(np.mean(recall)),4),"f1_macro":round(float(np.mean(f1)),4),"brier_score":round(brier,4),"log_loss":round(loss,4),
-                "calibration_gap":round(float(np.mean(abs(probs.max(axis=1)-(pred==y)))),4),
+                "calibration_gap":round(float(np.mean(abs(probs.max(axis=1)-(pred==y)))),4),"ece":round(ece,4),"reliability":reliability,
                 "stop_hit_rate":round(sum(x["stop_hit"] for x in items)/len(items),4),"tp_hit_rate":round(sum(x["tp_hit"] for x in items)/len(items),4),
                 "average_r":round(float(np.mean(rs)),4) if rs else None,"profit_factor":round(wins/losses,4) if losses else None}
     by_horizon={h:metrics([x for x in rows if x["horizon"]==h]) for h in ("1H","4H","1D")}

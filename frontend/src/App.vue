@@ -46,6 +46,7 @@ const aiLoading = ref(false),
   aiResult = ref<any>(null),
   backtestLoading = ref(false),
   backtestResult = ref<any>(null),
+  strategyLeaderboard = ref<any[]>([]),
   strategy = ref("ma"),
   initialCash = ref(10000);
 const marketContext = ref<any>(null),
@@ -77,6 +78,7 @@ const inWatchlist = computed(
     ),
 );
 const periods = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
+const v5BacktestStrategies=["breakout","pullback","moving_average","bollinger","rsi_reversal","fibonacci","bos","fvg","fib_fvg_bos"];
 function price(value: number | null | undefined, currency = "") {
   if (value == null) return "—";
   return `${currency === "CNY" ? "¥" : "$"}${value.toLocaleString("zh-CN", { maximumFractionDigits: value < 10 ? 4 : 2 })}`;
@@ -101,6 +103,9 @@ function availabilityLabel(status: any) {
       ? "不适用"
       : "暂无数据";
 }
+const strategyNames:Record<string,string>={trend:'趋势',breakout:'突破',pullback:'回撤',reversal:'反转',range:'区间',moving_average:'移动平均',bollinger:'布林带',rsi_breakout:'RSI突破',rsi_reversal:'RSI反转',macd:'MACD',fibonacci:'Fibonacci',gann:'Gann',stochastic:'随机指标',psar:'PSAR',momentum:'动量',mfi:'MFI',double_top_bottom:'双顶/双底',head_shoulders:'头肩形态',triangle:'三角形',donchian:'Donchian',wedge:'楔形',flag:'旗形',order_flow:'Order Flow',atr:'ATR',options:'期权',ict_smc:'ICT/SMC',fvg:'FVG',bos:'BOS',choch:'CHoCH',fib_fvg_bos:'Fib+FVG+BOS'};
+function strategyLabel(key:string){return strategyNames[key]||key}
+function signalClass(signal:string){return signal==='BUY'?'positive':signal==='SELL'?'negative':'neutral'}
 function rotationSymbols(items: any[]) {
   return (items || [])
     .slice(0, 3)
@@ -214,7 +219,7 @@ async function runAI() {
     portfolioRisk.value = await request<any>("/api/ai/portfolio-risk").catch(
       () => null,
     );
-    ElMessage.success("V4 量化研究审计与交易决策完成");
+    ElMessage.success("V5 因果技术策略与交易决策完成");
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : "AI预测失败");
   } finally {
@@ -226,7 +231,8 @@ async function runBacktest() {
   backtestLoading.value = true;
   backtestResult.value = null;
   try {
-    backtestResult.value = await post<any>("/api/backtest/run", {
+    const endpoint=v5BacktestStrategies.includes(strategy.value)?"/api/strategy/backtest":"/api/backtest/run";
+    backtestResult.value = await post<any>(endpoint, {
       symbol: selected.value.symbol,
       asset_type: selected.value.asset_type,
       interval: interval.value,
@@ -234,7 +240,9 @@ async function runBacktest() {
       initial_cash: initialCash.value,
       limit: 1000,
       slippage_rate: 0.0005,
+      walk_forward: true,
     });
+    strategyLeaderboard.value = (await request<any>("/api/strategy/leaderboard").catch(()=>({rows:[]}))).rows || [];
     ElMessage.success("历史回测完成");
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : "回测失败");
@@ -716,7 +724,7 @@ onMounted(loadHome);
           <div v-if="detailLoading" class="loading-box">
             正在获取 {{ interval.toUpperCase() }} 真实 K线…
           </div>
-          <KlineChart v-else :candles="candles" :indicators="indicators" />
+          <KlineChart v-else :candles="candles" :indicators="indicators" :structure="aiResult?.decision_center?.technical_strategy" />
         </section>
         <section v-if="indicators" class="panel">
           <div class="panel-top">
@@ -772,8 +780,8 @@ onMounted(loadHome);
           <div class="panel ai-panel">
             <div class="panel-top">
               <div>
-                <h3>AI V4 市场研究驾驶舱</h3>
-                <small class="muted">严格时间验证 · 市场联动 · 路径风险 · 数据质量</small>
+                <h3>AI V5 因果策略研究驾驶舱</h3>
+                <small class="muted">30类技术策略 · ICT/SMC · Fib/FVG/BOS · 严格时间验证</small>
               </div>
               <button class="primary" @click="runAI" :disabled="aiLoading">
                 {{ aiLoading ? "全链路计算中…" : "生成动态方案" }}
@@ -887,10 +895,28 @@ onMounted(loadHome);
               </div>
               <section v-if="aiResult.decision_center" class="decision-center">
                 <div class="decision-hero">
-                  <div><span>最终决策</span><b>{{ aiResult.decision_center.decision.action }}</b><small>{{ aiResult.decision_center.decision.reason }}</small></div>
-                  <div><span>机会评分</span><b>{{ aiResult.decision_center.trade_opportunity.score }} / 100</b><small>{{ aiResult.decision_center.decision.direction }}</small></div>
+                  <div><span>最终决策</span><b>{{ aiResult.decision_center.v5_final_decision?.action || aiResult.decision_center.decision.action }}</b><small>{{ aiResult.decision_center.v5_final_decision?.reason || aiResult.decision_center.decision.reason }}</small></div>
+                  <div><span>策略共振</span><b>{{ aiResult.decision_center.v5_final_decision?.strategy_confluence ?? aiResult.decision_center.trade_opportunity.score }} / 100</b><small>{{ aiResult.decision_center.v5_final_decision?.direction || aiResult.decision_center.decision.direction }}</small></div>
                   <div><span>风险等级</span><b>{{ aiResult.decision_center.risk_level.level }}</b><small>{{ probability(aiResult.decision_center.risk_level.score) }}</small></div>
                 </div>
+                <section v-if="aiResult.decision_center.technical_strategy" class="strategy-radar">
+                  <div class="panel-top"><div><h3>技术策略雷达</h3><small class="muted">同源指标先按信息家族去重，再计算共振；不可用数据不计分</small></div><b>{{ aiResult.decision_center.technical_strategy.confluence.score }} / 100 · {{ aiResult.decision_center.technical_strategy.confluence.signal }}</b></div>
+                  <div class="strategy-grid">
+                    <details v-for="item in aiResult.decision_center.technical_strategy.signals" :key="item.strategy" class="strategy-card">
+                      <summary><span class="signal-dot" :class="signalClass(item.signal)"></span><b>{{ strategyLabel(item.strategy) }}</b><em :class="signalClass(item.signal)">{{ item.status === 'AVAILABLE' ? item.signal : item.status }}</em><small>{{ item.confidence.toFixed(0) }}%</small></summary>
+                      <p>{{ item.reason }}</p>
+                      <div class="strategy-meta"><span>强度 {{ item.strength }}</span><span>周期 {{ item.timeframe }}</span><span>质量 {{ item.data_quality }}</span><span>{{ item.timestamp?.replace('T',' ').slice(0,19) }} UTC</span></div>
+                      <div class="level-list"><div v-for="(e,index) in item.evidence" :key="`${item.strategy}-${index}`"><b>{{ e.name }}</b><span>{{ e.value }} · 贡献 {{ e.contribution }}</span></div></div>
+                    </details>
+                  </div>
+                  <div class="structure-summary">
+                    <article><span>市场结构</span><b>{{ aiResult.decision_center.technical_strategy.structure.trend }}</b><small>BOS {{ aiResult.decision_center.technical_strategy.structure.latest_bos?.direction || 'NONE' }} · CHoCH {{ aiResult.decision_center.technical_strategy.structure.latest_choch?.direction || 'NONE' }}</small></article>
+                    <article><span>Fibonacci</span><b>{{ aiResult.decision_center.technical_strategy.fibonacci.status }}</b><small>{{ aiResult.decision_center.technical_strategy.fibonacci.direction || '—' }} · available_at {{ aiResult.decision_center.technical_strategy.fibonacci.available_at?.replace('T',' ').slice(0,19) || '—' }}</small></article>
+                    <article><span>FVG</span><b>{{ aiResult.decision_center.technical_strategy.fvgs.filter((x:any)=>x.status!=='FILLED').length }} Open</b><small>只绘制三K线真实缺口</small></article>
+                    <article><span>动态风险</span><b>EV {{ aiResult.decision_center.technical_strategy.risk_plan.expected_value }}</b><small>样本 {{ aiResult.decision_center.technical_strategy.risk_plan.historical_samples }} · SL {{ aiResult.decision_center.technical_strategy.risk_plan.stop_loss }}</small></article>
+                  </div>
+                  <details><summary>多空与中性证据链</summary><div class="evidence-columns"><div><h4>看多</h4><p v-for="(e,i) in aiResult.decision_center.technical_strategy.evidence_chain.bullish" :key="`b${i}`">+ {{ e.name }} · {{ e.value }}</p></div><div><h4>看空</h4><p v-for="(e,i) in aiResult.decision_center.technical_strategy.evidence_chain.bearish" :key="`s${i}`">- {{ e.name }} · {{ e.value }}</p></div><div><h4>中性/缺数据</h4><p v-for="(e,i) in aiResult.decision_center.technical_strategy.evidence_chain.neutral" :key="`n${i}`">{{ strategyLabel(e.name) }} · {{ e.value }}</p></div></div></details>
+                </section>
                 <div class="decision-grid">
                   <article><h4>市场环境</h4><b>{{ aiResult.decision_center.market_regime.primary }}</b><p>{{ aiResult.decision_center.market_regime.risk_mode }} · {{ aiResult.decision_center.market_regime.volatility }}</p></article>
                   <article><h4>资金方向</h4><b>{{ aiResult.decision_center.capital_flow.direction }}</b><p>{{ aiResult.decision_center.capital_flow.price_flow_relation }} · 持续性 {{ probability(aiResult.decision_center.capital_flow.flow_persistence) }}</p></article>
@@ -946,7 +972,16 @@ onMounted(loadHome);
                 <option value="macd">MACD</option>
                 <option value="rsi">RSI</option>
                 <option value="ai">AI 趋势</option>
-                <option value="ai_technical">AI + 技术指标</option></select
+                <option value="ai_technical">AI + 技术指标</option>
+                <option value="breakout">V5 突破</option>
+                <option value="pullback">V5 回撤</option>
+                <option value="moving_average">V5 四均线</option>
+                <option value="bollinger">V5 布林带</option>
+                <option value="rsi_reversal">V5 RSI反转</option>
+                <option value="fibonacci">V5 Fibonacci</option>
+                <option value="bos">V5 BOS</option>
+                <option value="fvg">V5 FVG</option>
+                <option value="fib_fvg_bos">V5 Fib+FVG+BOS</option></select
               ><input
                 v-model.number="initialCash"
                 type="number"
@@ -995,6 +1030,8 @@ onMounted(loadHome);
               v-if="backtestResult"
               :curve="backtestResult.equity_curve"
             />
+            <details v-if="backtestResult?.walk_forward"><summary>Walk-forward / Purged / Embargo</summary><p class="data-warning">{{ backtestResult.walk_forward.status }} · {{ backtestResult.walk_forward.method }} · 样本外交易 {{ backtestResult.walk_forward.out_of_sample_trades }}</p><div class="level-list"><div v-for="fold in backtestResult.walk_forward.folds" :key="fold.fold"><b>Fold {{ fold.fold }} · EV {{ fold.expectancy }} · Sharpe {{ fold.sharpe }}</b><span>{{ fold.test_start }} → {{ fold.test_end }} · embargo {{ fold.embargo_bars }}</span></div></div></details>
+            <details v-if="strategyLeaderboard.length" class="strategy-leaderboard"><summary>策略排行榜（真实已保存回测）</summary><div class="table-row order"><b>策略</b><span>胜率</span><span>EV / PF</span><span>Sharpe</span><span>交易数</span></div><div v-for="row in strategyLeaderboard" :key="`${row.symbol}-${row.interval}-${row.strategy}`" class="table-row order"><b>{{ strategyLabel(row.strategy) }} · {{ row.symbol }} {{ row.interval }}</b><span>{{ probability(row.win_rate) }}</span><span>{{ row.expectancy ?? '—' }} / {{ row.profit_factor ?? '—' }}</span><span>{{ row.sharpe ?? '—' }}</span><span>{{ row.number_of_trades }}</span></div></details>
             <div v-else class="empty">
               真实历史行情回测，计入手续费和滑点；AI 策略只用样本外信号。
             </div>

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -29,6 +30,9 @@ from .providers import fetch_quotes
 from .feature_services import FeatureStore
 from .v3_engines import CapitalFlowEngine, MarketRegimeEngine, analyze_v3
 from .v4_research import PortfolioRiskEngine, build_research_layer
+from .strategy_engine import (SIGNAL_KEYS, StrategyEngine, strategy_backtest,
+                              strategy_incremental_experiment, walk_forward_strategy,
+                              optimize_strategy_parameters, ml_ict_incremental_experiment)
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))["version"]
@@ -94,6 +98,22 @@ class BacktestRequest(BaseModel):
     slippage_rate: float = Field(default=.0005, ge=0, le=.05)
 
 
+class StrategyBacktestRequest(BaseModel):
+    symbol: str
+    asset_type: str
+    interval: str = "1h"
+    strategy: str = "fib_fvg_bos"
+    limit: int = Field(default=1000, ge=200, le=5000)
+    fee_rate: float | None = Field(default=None, ge=0, le=.05)
+    slippage_rate: float = Field(default=.0005, ge=0, le=.05)
+    walk_forward: bool = True
+    optimize: bool = False
+    start_time: str | None = None
+    end_time: str | None = None
+    parameters: dict[str, float] = Field(default_factory=dict)
+    initial_cash: float = Field(default=100000, gt=0)
+
+
 class PaperOrderRequest(BaseModel):
     symbol: str
     asset_type: str
@@ -107,7 +127,7 @@ def health() -> dict:
     with connection() as conn:
         conn.execute("SELECT 1").fetchone()
     frontend_ready = (DIST / "index.html").exists()
-    return {"status": "ok", "service": "AI行情助手", "phase": "V4 量化研究审计", "version": VERSION,
+    return {"status": "ok", "service": "AI行情助手", "phase": "V5 因果技术策略引擎", "version": VERSION,
             "desktop": os.environ.get("TRADING_AI_DESKTOP") == "1", "database": "ok",
             "database_path": str(DB_PATH), "frontend": "ok" if frontend_ready else "missing"}
 
@@ -204,6 +224,43 @@ async def api_predict(body: PredictionRequest) -> dict:
                                      ([{"field":"price","sources":quote_validation.get("values"),"spread_percent":quote_validation.get("spread_percent")}]
                                       if quote_validation.get("conflict") else []))
     decision["research"]=research
+    technical_engine = StrategyEngine()
+    decision["technical_strategy"] = await asyncio.to_thread(
+        technical_engine.analyze, data["candles"], body.interval, source)
+    multi_rows, multi_sources = await _strategy_timeframe_history(body.asset_type, symbol, body.interval, data["candles"], source)
+    multi = await asyncio.to_thread(technical_engine.analyze_multi_timeframe, multi_rows, multi_sources)
+    decision["technical_strategy"]["multi_timeframe"] = multi
+    factor = multi["confidence_factor"]
+    if factor < 1:
+        for signal in decision["technical_strategy"]["signals"]:
+            signal["confidence"] = round(signal["confidence"] * factor, 2)
+        decision["technical_strategy"]["confluence"]["score"] = round(decision["technical_strategy"]["confluence"]["score"] * factor, 2)
+        decision["technical_strategy"]["confluence"]["higher_timeframe_penalty"] = factor
+    primary = result["predictions"].get("1H") or next((item for item in result["predictions"].values() if item.get("prediction")), {})
+    technical = decision["technical_strategy"]; tech_signal = technical["confluence"]["signal"]
+    model_direction = primary.get("prediction", "FLAT")
+    aligned = (tech_signal == "BUY" and model_direction == "UP") or (tech_signal == "SELL" and model_direction == "DOWN")
+    positive_ev = technical["risk_plan"]["expected_value"] is not None and technical["risk_plan"]["expected_value"] > 0
+    if aligned and positive_ev and not multi["conflict"]:
+        final_action = tech_signal
+        final_reason = "CALIBRATED_MODEL_AND_DEDUPLICATED_STRATEGIES_ALIGNED_WITH_POSITIVE_EV"
+    elif multi["conflict"]:
+        final_action = "WATCH"
+        final_reason = "HIGHER_TIMEFRAME_CONFLICT"
+    else:
+        final_action = "HOLD"
+        final_reason = "MODEL_STRATEGY_MISMATCH_OR_NON_POSITIVE_EV"
+    decision["v5_final_decision"] = {
+        "action": final_action, "reason": final_reason, "direction": technical["confluence"]["direction"],
+        "probabilities": primary.get("probabilities"), "expected_return": research.get("return_distribution",{}).get("expected_return"),
+        "expected_volatility": research.get("return_distribution",{}).get("expected_volatility"),
+        "entry": technical["risk_plan"]["entry"], "stop": technical["risk_plan"]["stop_loss"],
+        "take_profits": technical["risk_plan"]["take_profits"], "expected_value": technical["risk_plan"]["expected_value"],
+        "strategy_confluence": technical["confluence"]["score"], "model_confidence": primary.get("confidence_score"),
+        "data_quality": technical["data_quality"]["score"], "market_regime": technical["market_regime"],
+        "bullish_evidence": technical["evidence_chain"]["bullish"], "bearish_evidence": technical["evidence_chain"]["bearish"],
+        "neutral_evidence": technical["evidence_chain"]["neutral"],
+        "invalidation_conditions": technical["risk_plan"]["invalidation_conditions"]}
     # Persist only observed/calculated feature values. This table is separate
     # from final predictions and can be audited by timestamp and source.
     observed_frame=feature_frame(data["candles"])
@@ -211,10 +268,16 @@ async def api_predict(body: PredictionRequest) -> dict:
                             observed_frame,source,research["data_quality"]["grade"])
     await asyncio.to_thread(save_external_feature_observations,symbol,research["live_data_collected_at"],external,
                             research["data_quality"]["grade"])
+    signed_strengths={signal["strategy"]:(signal["strength"] if signal["signal"]=="BUY" else -signal["strength"] if signal["signal"]=="SELL" else 0)
+                      for signal in decision["technical_strategy"]["signals"] if signal["status"]=="AVAILABLE"}
+    await asyncio.to_thread(save_external_feature_observations,symbol,research["live_data_collected_at"],
+                            {"v5_strategy":{"source":"causal StrategyEngine v5","signals":signed_strengths,
+                                            "confluence":decision["technical_strategy"]["confluence"]["score"]}},
+                            research["data_quality"]["grade"])
     resolved = await asyncio.to_thread(resolve_prediction_history, symbol, data["candles"])
     saved = await asyncio.to_thread(save_prediction_history, symbol, body.asset_type, body.interval, result, decision)
     result["decision_center"] = decision; result["history"] = {"resolved":resolved,"saved":saved}
-    return ok(result, message="V4 量化研究审计与交易决策完成", source=source)
+    return ok(result, message="V5 因果技术策略、量化研究审计与交易决策完成", source=source)
 
 
 async def _cross_asset_history(asset_type: str, interval: str, symbol: str, current: list[dict]) -> dict[str,list[dict]]:
@@ -230,6 +293,23 @@ async def _cross_asset_history(asset_type: str, interval: str, symbol: str, curr
     history=await macro_history(interval)
     peers.update(history.get("assets",{}))
     return peers
+
+
+async def _strategy_timeframe_history(asset_type: str, symbol: str, current_interval: str,
+                                      current: list[dict], current_source: str) -> tuple[dict[str,list[dict]],dict[str,str]]:
+    timeframes = ("1d", "4h", "1h", "15m", "5m")
+    rows_by = {current_interval: current}; sources = {current_interval: current_source}
+    async def fetch(timeframe: str):
+        try:
+            rows, provider = await (crypto_kline(symbol,timeframe,500) if asset_type=="crypto" else stock_kline(symbol,timeframe,500))
+            return timeframe, rows, provider
+        except Exception as exc:
+            return timeframe, [], f"UNAVAILABLE:{type(exc).__name__}"
+    fetched = await asyncio.gather(*(fetch(tf) for tf in timeframes if tf != current_interval))
+    for timeframe, rows, provider in fetched:
+        if rows: rows_by[timeframe] = rows
+        sources[timeframe] = provider
+    return rows_by, sources
 
 
 async def _capital_rotation(asset_type: str, interval: str, symbol: str, current: list[dict]) -> list[dict]:
@@ -294,8 +374,22 @@ async def api_backtest(body: BacktestRequest) -> dict:
     symbol = normalize_crypto(body.symbol) if body.asset_type == "crypto" else body.symbol
     data, source = await _kline(body.asset_type, symbol, body.interval, body.limit)
     fee = body.fee_rate if body.fee_rate is not None else (.001 if body.asset_type == "crypto" else .0003)
-    result = await asyncio.to_thread(run_backtest, data["candles"], body.strategy, body.initial_cash, fee,
-                                     body.slippage_rate, body.interval, body.asset_type)
+    legacy_strategies = {"ma", "macd", "rsi", "ai", "ai_technical"}
+    if body.strategy in SIGNAL_KEYS and body.strategy not in legacy_strategies:
+        result = await asyncio.to_thread(strategy_backtest, data["candles"], body.strategy, body.interval,
+                                         fee, body.slippage_rate)
+        result["initial_cash"] = body.initial_cash
+        result["return_percent"] = round(((math.prod(1 + trade["return"] for trade in result["trades"]) - 1) * 100), 2) if result["trades"] else 0
+        result["final_cash"] = round(body.initial_cash * (1 + result["return_percent"] / 100), 2)
+        result["max_drawdown_percent"] = round((result.get("max_drawdown") or 0) * 100, 2)
+        result["win_rate_percent"] = round((result.get("win_rate") or 0) * 100, 2)
+        result["trade_count"] = result["number_of_trades"]
+        result["sharpe_ratio"] = result["sharpe"]; result["sortino_ratio"] = result["sortino"]
+        result["fee_rate"] = fee; result["slippage_rate"] = body.slippage_rate
+        result["equity_curve"] = []
+    else:
+        result = await asyncio.to_thread(run_backtest, data["candles"], body.strategy, body.initial_cash, fee,
+                                         body.slippage_rate, body.interval, body.asset_type)
     result.update({"symbol": symbol, "asset_type": body.asset_type, "interval": body.interval, "data_source": source})
     result["run_id"] = save_backtest(symbol, body.asset_type, body.strategy, body.interval, result)
     return ok(result, message="回测完成", source=source)
@@ -303,6 +397,81 @@ async def api_backtest(body: BacktestRequest) -> dict:
 
 @app.get("/api/backtest/history")
 def backtest_history(limit: int = Query(30,ge=1,le=100)) -> dict: return ok(list_backtests(limit))
+
+
+@app.get("/api/strategy/catalog")
+def strategy_catalog() -> dict:
+    return ok({"count": len(SIGNAL_KEYS), "strategies": list(SIGNAL_KEYS),
+               "unavailable_without_external_data": ["order_flow", "options"],
+               "causality": "confirmed swing available_at; signal close T; execution open T+1"})
+
+
+@app.get("/api/strategy/leaderboard")
+def strategy_leaderboard(limit: int = Query(200, ge=1, le=1000)) -> dict:
+    latest: dict[tuple[str,str,str],dict] = {}
+    for run in list_backtests(limit):
+        result = run["result"]
+        if run["strategy"] not in SIGNAL_KEYS or "number_of_trades" not in result: continue
+        key = (run["symbol"], run["interval"], run["strategy"])
+        if key not in latest:
+            latest[key] = {"symbol":run["symbol"],"interval":run["interval"],"strategy":run["strategy"],
+                           "created_at":run["created_at"],**{name:result.get(name) for name in
+                           ("number_of_trades","win_rate","profit_factor","expectancy","sharpe","sortino","max_drawdown","mae","mfe","status")}}
+    rows = sorted(latest.values(), key=lambda item: (item.get("expectancy") or -999, item.get("sharpe") or -999), reverse=True)
+    return ok({"status":"AVAILABLE" if rows else "NO_VALIDATED_RUNS","rows":rows,
+               "notice":"仅显示用户实际运行并保存的因果历史回测；无记录时不填成绩。"})
+
+
+@app.post("/api/strategy/analyze")
+async def strategy_analyze(body: PredictionRequest) -> dict:
+    symbol = normalize_crypto(body.symbol) if body.asset_type == "crypto" else body.symbol
+    data, source = await _kline(body.asset_type, symbol, body.interval, 1200)
+    result = await asyncio.to_thread(StrategyEngine().analyze, data["candles"], body.interval, source)
+    result.update({"symbol": symbol, "asset_type": body.asset_type, "interval": body.interval, "data_source": source})
+    return ok(result, message="30 类因果技术策略分析完成", source=source)
+
+
+@app.post("/api/strategy/backtest")
+async def strategy_lab(body: StrategyBacktestRequest) -> dict:
+    if body.strategy not in SIGNAL_KEYS: raise HTTPException(400, "未知 V5 策略")
+    symbol = normalize_crypto(body.symbol) if body.asset_type == "crypto" else body.symbol
+    data, source = await _kline(body.asset_type, symbol, body.interval, body.limit)
+    rows = data["candles"]
+    if body.start_time or body.end_time:
+        frame = pd.DataFrame(rows); stamps = pd.to_datetime(frame["timestamp"], utc=True)
+        mask = pd.Series(True, index=frame.index)
+        if body.start_time:
+            start=pd.Timestamp(body.start_time);start=start.tz_localize("UTC") if start.tzinfo is None else start.tz_convert("UTC");mask &= stamps >= start
+        if body.end_time:
+            end=pd.Timestamp(body.end_time);end=end.tz_localize("UTC") if end.tzinfo is None else end.tz_convert("UTC");mask &= stamps <= end
+        rows = frame.loc[mask].to_dict("records")
+    if len(rows) < 200: raise HTTPException(400, "所选时间范围真实 K 线不足 200 根")
+    fee = body.fee_rate if body.fee_rate is not None else (.001 if body.asset_type == "crypto" else .0003)
+    result = await asyncio.to_thread(strategy_backtest, rows, body.strategy, body.interval, fee, body.slippage_rate, 8, 80, body.parameters)
+    if body.walk_forward:
+        result["walk_forward"] = await asyncio.to_thread(walk_forward_strategy, rows, body.strategy, body.interval)
+    if body.optimize:
+        result["parameter_optimization"] = await asyncio.to_thread(optimize_strategy_parameters, rows, body.strategy, body.interval, fee, body.slippage_rate)
+    compounded = math.prod(1 + trade["return"] for trade in result["trades"]) if result["trades"] else 1.0
+    result.update({"initial_cash":body.initial_cash,"final_cash":round(body.initial_cash*compounded,2),
+                   "return_percent":round((compounded-1)*100,2),"max_drawdown_percent":round((result.get("max_drawdown") or 0)*100,2),
+                   "win_rate_percent":round((result.get("win_rate") or 0)*100,2),"trade_count":result["number_of_trades"],
+                   "sharpe_ratio":result["sharpe"],"sortino_ratio":result["sortino"],"fee_rate":fee,
+                   "slippage_rate":body.slippage_rate,
+                   "equity_curve":[{"timestamp":trade["execution_time"],"equity":round(body.initial_cash*math.prod(1+t["return"] for t in result["trades"][:index+1]),2)} for index,trade in enumerate(result["trades"])]})
+    result.update({"symbol": symbol, "asset_type": body.asset_type, "interval": body.interval, "data_source": source})
+    result["run_id"] = save_backtest(symbol, body.asset_type, body.strategy, body.interval, result)
+    return ok(result, message="策略实验室样本外验证完成", source=source)
+
+
+@app.post("/api/strategy/incremental-experiment")
+async def strategy_incremental(body: StrategyBacktestRequest) -> dict:
+    symbol = normalize_crypto(body.symbol) if body.asset_type == "crypto" else body.symbol
+    data, source = await _kline(body.asset_type, symbol, body.interval, body.limit)
+    result = await asyncio.to_thread(strategy_incremental_experiment, data["candles"], body.interval)
+    result["ml_ablation"] = await asyncio.to_thread(ml_ict_incremental_experiment, data["candles"], body.interval, body.asset_type)
+    result.update({"symbol": symbol, "asset_type": body.asset_type, "interval": body.interval, "data_source": source})
+    return ok(result, message="Fib/FVG/BOS 增量实验完成", source=source)
 
 
 @app.post("/api/paper/order")

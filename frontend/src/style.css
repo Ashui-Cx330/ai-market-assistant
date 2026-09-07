@@ -775,6 +775,51 @@ footer {
   display: flex;
   justify-content: space-between;
 }
+.strategy-radar {
+  margin: 14px 0;
+  padding: 16px;
+  border: 1px solid #28465c;
+  border-radius: 16px;
+  background: #0a1927;
+}
+.strategy-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.strategy-card {
+  padding: 10px 12px;
+  border: 1px solid #203b50;
+  border-radius: 10px;
+  background: #0d2030;
+}
+.strategy-card summary {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+.strategy-card summary em { font-style: normal; font-size: 10px; }
+.strategy-card summary small, .strategy-meta { color: #71879c; font-size: 9px; }
+.strategy-card p { color: #91a6b9; font-size: 10px; line-height: 1.6; }
+.signal-dot { width: 8px; height: 8px; border-radius: 50%; background: #71879c; }
+.signal-dot.positive { background: #22c997; box-shadow: 0 0 8px #22c99788; }
+.signal-dot.negative { background: #f15b72; box-shadow: 0 0 8px #f15b7288; }
+.neutral { color: #8ba0b4; }
+.strategy-meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 7px 0; }
+.structure-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+.structure-summary article { padding: 12px; border-radius: 10px; background: #102536; }
+.structure-summary span, .structure-summary small { display: block; color: #71879c; font-size: 9px; }
+.structure-summary b { display: block; margin: 5px 0; }
+.evidence-columns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.evidence-columns > div { padding: 10px; background: #102131; border-radius: 10px; }
+.evidence-columns p { margin: 4px 0; font-size: 9px; }
 @media (max-width: 1100px) {
   .grid {
     grid-template-columns: repeat(2, 1fr);
@@ -788,6 +833,8 @@ footer {
   .indicator-grid {
     grid-template-columns: repeat(2, 1fr);
   }
+  .strategy-grid { grid-template-columns: repeat(2, 1fr); }
+  .structure-summary { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 720px) {
   .shell {
@@ -825,4 +872,5 @@ footer {
   .head-actions {
     flex-direction: column;
   }
+  .strategy-grid, .structure-summary, .evidence-columns { grid-template-columns: 1fr; }
 }
