@@ -1,6 +1,6 @@
 # AI行情助手自动更新与发布
 
-当前正式版本：**v1.0.1**。更新仓库：`Ashui-Cx330/ai-market-assistant`。
+当前代码版本：**v1.3.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
 
 ## 当前实现
 

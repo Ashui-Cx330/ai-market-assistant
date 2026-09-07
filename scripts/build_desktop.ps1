@@ -15,6 +15,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Backend build dependency installation failed' 
 Write-Output '[3/5] Freezing hidden backend service'
 & "$root\.venv\Scripts\python.exe" -m PyInstaller --noconfirm --clean --onefile --noconsole --name $serviceName `
   --distpath "$root\backend-dist" --workpath "$root\work\pyinstaller" --specpath "$root\work" `
+  --collect-binaries xgboost --collect-data xgboost --hidden-import xgboost.sklearn `
+  --collect-binaries lightgbm --collect-data lightgbm --hidden-import lightgbm.sklearn `
   --add-data "$root\version.json;." `
   "$root\backend\desktop_server.py"
 if ($LASTEXITCODE -ne 0) { throw 'Backend executable build failed' }

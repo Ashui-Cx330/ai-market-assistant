@@ -3,9 +3,11 @@ const { spawn } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
 const state = require('./update-state.cjs')
+const updatePolicy = require('./update-policy.cjs')
 
 let configured = false
 let checking = false
+let installing = false
 let parentWindow = null
 let logger = () => {}
 const concise = value => String(value?.message || value || 'unknown error').split(/\r?\n/, 1)[0]
@@ -33,11 +35,18 @@ function configureUpdater() {
   // then fail with EXDEV. The per-user Temp directory is on the same machine,
   // is writable without elevation, and does not contain persistent user data.
   if (process.platform === 'win32' && autoUpdater.app) {
-    autoUpdater.app.baseCachePath = app.getPath('temp')
+    Object.defineProperty(autoUpdater.app, 'baseCachePath', { value: app.getPath('temp'), configurable: true })
+    // Pin NSIS to the directory of the running per-user installation. This
+    // avoids an unrelated legacy all-users installation with the same display
+    // name from receiving the update or being selected for --force-run.
+    autoUpdater.installDirectory = path.dirname(process.execPath)
   }
   if (!configuration.embedded) autoUpdater.setFeedURL(configuration)
   autoUpdater.autoDownload = false
-  autoUpdater.autoInstallOnAppQuit = true
+  // Installation is started exactly once below, after the backup and rollback
+  // transaction have been persisted.  Letting app quit trigger installation as
+  // well can reopen a cached NSIS installer after a cancelled/failed update.
+  autoUpdater.autoInstallOnAppQuit = false
   autoUpdater.disableWebInstaller = true
   autoUpdater.logger = {
     info: value => logger(concise(value)), warn: value => logger(concise(value)),
@@ -55,7 +64,7 @@ function configureUpdater() {
 
 function copyInstalledVersion(info) {
   const installDir = path.dirname(process.execPath)
-  const backupRoot = path.join(app.getPath('userData'), 'update-backups')
+  const backupRoot = path.join(app.getPath('temp'), 'AI行情助手-update-backups')
   const backupPath = path.join(backupRoot, `v${app.getVersion()}`)
   fs.mkdirSync(backupRoot, { recursive: true })
   if (fs.existsSync(backupPath)) fs.rmSync(backupPath, { recursive: true, force: true })
@@ -69,8 +78,10 @@ function copyInstalledVersion(info) {
     healthCheck: 'waiting',
     launchAttempts: 0,
     backupPath,
+    backupRoot,
     installDir,
     executableName: path.basename(process.execPath),
+    backendExecutableName: 'AI行情助手服务.exe',
     downloadResult: 'verified-by-electron-updater',
     installResult: 'pending'
   })
@@ -83,7 +94,9 @@ function startRollbackGuard() {
   const timeout = process.env.AI_UPDATE_HEALTH_TIMEOUT_SECONDS || '300'
   const child = spawn('powershell.exe', [
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
-    '-File', guard, '-StateFile', state.statePath(), '-LogFile', state.updateLogPath(), '-TimeoutSeconds', timeout
+    '-File', guard, '-StateFile', state.statePath(), '-LogFile', state.updateLogPath(), '-TimeoutSeconds', timeout,
+    '-AllowedInstallDir', path.dirname(process.execPath),
+    '-AllowedBackupRoot', path.join(app.getPath('temp'), 'AI行情助手-update-backups')
   ], { detached: true, windowsHide: true, stdio: 'ignore' })
   child.unref()
   state.updateLog(`rollback guard started: pid=${child.pid}, timeout=${timeout}s`)
@@ -123,12 +136,24 @@ async function offerUpdate(autoUpdater, info, interactive) {
 
 async function checkForUpdates(parent, log, options = {}) {
   if (!app.isPackaged && process.env.AI_UPDATE_ALLOW_DEV !== '1') return { status: 'development' }
+  if (installing) return { status: 'installing' }
   if (checking) return { status: 'checking' }
   checking = true
   parentWindow = parent
   logger = log
   const interactive = Boolean(options.interactive)
   try {
+    const saved = state.readState()
+    if (saved.updateStatus === 'pending-health-check' && saved.pendingVersion) {
+      state.updateLog(`update check suppressed: transaction pending for ${saved.pendingVersion}`)
+      if (interactive) await dialog.showMessageBox(parent, {
+        type: 'info', title: '更新正在处理中',
+        message: `版本 v${saved.pendingVersion} 的更新事务尚未结束。`,
+        detail: '系统不会重复打开安装程序；启动验证或自动恢复完成后才能再次更新。',
+        buttons: ['知道了']
+      })
+      return { status: 'update-pending', version: saved.pendingVersion }
+    }
     const autoUpdater = configureUpdater()
     if (!autoUpdater) {
       log('update check skipped: no GitHub owner/repo or embedded app-update.yml')
@@ -141,8 +166,8 @@ async function checkForUpdates(parent, log, options = {}) {
 
     const result = await autoUpdater.checkForUpdates()
     const info = result?.updateInfo
-    if (!info || info.version === app.getVersion()) {
-      state.updateLog(`no update: current=${app.getVersion()}`)
+    if (!info || !updatePolicy.isStrictlyNewerVersion(info.version, app.getVersion())) {
+      state.updateLog(`no update: current=${app.getVersion()}, available=${info?.version || 'none'}`)
       if (interactive) await dialog.showMessageBox(parent, { type: 'info', title: '检查更新', message: '当前已经是最新版本。', buttons: ['知道了'] })
       return { status: 'current', version: app.getVersion() }
     }
@@ -151,8 +176,9 @@ async function checkForUpdates(parent, log, options = {}) {
       parent?.setProgressBar(-1)
       copyInstalledVersion(info)
       startRollbackGuard()
-      state.updateLog('installer launching; current app will quit')
-      autoUpdater.quitAndInstall(false, true)
+      installing = true
+      state.updateLog('silent installer launching once; current app will quit')
+      autoUpdater.quitAndInstall(updatePolicy.INSTALL_OPTIONS.isSilent, updatePolicy.INSTALL_OPTIONS.isForceRunAfter)
       return { status: 'installing', version: info.version }
     }
     return { status: action, version: info.version }

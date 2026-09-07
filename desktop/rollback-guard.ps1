@@ -14,6 +14,8 @@ function Write-UpdateLog([string]$Message) {
 }
 
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+$restartAfter = (Get-Date).AddSeconds(15)
+$restartAttempted = $false
 while ((Get-Date) -lt $deadline) {
   Start-Sleep -Seconds 2
   if (-not (Test-Path -LiteralPath $StateFile)) { continue }
@@ -26,6 +28,27 @@ while ((Get-Date) -lt $deadline) {
     exit 0
   }
   if ($state.updateStatus -eq 'rolled-back') { exit 0 }
+  # NSIS --force-run is normally sufficient, but on some Windows profiles the
+  # installer exits without launching the new executable.  The independent
+  # guard provides a second, bounded restart path after the installed file is
+  # confirmed to be the pending version.
+  if (-not $SkipRestart -and -not $restartAttempted -and (Get-Date) -ge $restartAfter -and $state.updateStatus -eq 'pending-health-check') {
+    try {
+      $candidateInstallDir = [IO.Path]::GetFullPath([string]$state.installDir).TrimEnd('\')
+      $expectedInstallDir = if ($AllowedInstallDir) { [IO.Path]::GetFullPath($AllowedInstallDir).TrimEnd('\') } else { $candidateInstallDir }
+      $candidateExecutable = Join-Path $candidateInstallDir ([string]$state.executableName)
+      if ($candidateInstallDir -eq $expectedInstallDir -and (Test-Path -LiteralPath $candidateExecutable)) {
+        $installedVersion = (Get-Item -LiteralPath $candidateExecutable).VersionInfo.ProductVersion
+        if ($installedVersion -eq $state.pendingVersion -or $installedVersion.StartsWith(([string]$state.pendingVersion) + '.')) {
+          Start-Process -FilePath $candidateExecutable
+          $restartAttempted = $true
+          Write-UpdateLog ('rollback guard launched pending version ' + $state.pendingVersion)
+        }
+      }
+    } catch {
+      Write-UpdateLog ('pending version restart deferred: ' + $_.Exception.Message)
+    }
+  }
 }
 
 $state = [IO.File]::ReadAllText($StateFile, [Text.Encoding]::UTF8) | ConvertFrom-Json
@@ -40,9 +63,19 @@ if ($installDir -ne $allowedInstall -or (-not $AllowedInstallDir -and -not $inst
 }
 
 Write-UpdateLog ('health check timed out; rolling back ' + $state.pendingVersion + ' to ' + $state.previousVersion)
-if (-not $SkipProcessKill) { & taskkill.exe /IM ([string]$state.executableName) /T /F 2>$null | Out-Null }
+if (-not $SkipProcessKill) {
+  # A launch failure may mean there is no remaining process. taskkill reports
+  # that normal condition on stderr; it must not abort the rollback.
+  $savedErrorAction = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  & taskkill.exe /IM ([string]$state.executableName) /T /F 2>$null | Out-Null
+  if ($state.backendExecutableName) {
+    & taskkill.exe /IM ([string]$state.backendExecutableName) /T /F 2>$null | Out-Null
+  }
+  $ErrorActionPreference = $savedErrorAction
+}
 Start-Sleep -Seconds 2
-& robocopy.exe $backupDir $installDir /MIR /R:2 /W:1 /NFL /NDL /NJH /NJS | Out-Null
+& robocopy.exe $backupDir $installDir /MIR /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS | Out-Null
 if ($LASTEXITCODE -ge 8) { Write-UpdateLog ('rollback copy failed with code ' + $LASTEXITCODE); exit 3 }
 
 $bad = @($state.badVersions)

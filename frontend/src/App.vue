@@ -1,72 +1,1141 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
-import { DataAnalysis, HomeFilled, Refresh, Search, Setting, Star, TrendCharts, Wallet } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
-import KlineChart from './KlineChart.vue';import EquityChart from './EquityChart.vue'
-import { assetLabel, post, request, type Asset, type Candle, type IndicatorSet, type Quote } from './api'
+import { computed, nextTick, onMounted, ref } from "vue";
+import {
+  DataAnalysis,
+  HomeFilled,
+  Refresh,
+  Search,
+  Setting,
+  Star,
+  TrendCharts,
+  Wallet,
+} from "@element-plus/icons-vue";
+import { ElMessage } from "element-plus";
+import KlineChart from "./KlineChart.vue";
+import EquityChart from "./EquityChart.vue";
+import {
+  assetLabel,
+  post,
+  request,
+  type Asset,
+  type Candle,
+  type IndicatorSet,
+  type Quote,
+} from "./api";
 
-type Page='home'|'detail'|'paper'|'watchlist'|'settings'
-const page=ref<Page>('home'),items=ref<Asset[]>([]),appVersion=ref('0.3.0'),loading=ref(false),error=ref(''),lastUpdate=ref('')
-const query=ref(''),searching=ref(false),searchError=ref(''),searchResults=ref<Asset[]>([]),searchOpen=ref(false)
-const selected=ref<Asset|null>(null),quote=ref<Quote|null>(null),candles=ref<Candle[]>([]),indicators=ref<IndicatorSet|null>(null),interval=ref('1h'),detailLoading=ref(false),detailError=ref('')
-const aiLoading=ref(false),aiResult=ref<any>(null),backtestLoading=ref(false),backtestResult=ref<any>(null),strategy=ref('ma'),initialCash=ref(10000)
-const orderAmount=ref(1000),orderLoading=ref(false),watchlist=ref<any[]>([]),paperAccounts=ref<any[]>([]),positions=ref<any[]>([]),orders=ref<any[]>([]),paperLoading=ref(false)
-const updateChecking=ref(false),updateStatus=ref('启动时会自动检查更新；也可以在这里手动检查。')
-const cryptos=computed(()=>items.value.filter(x=>x.asset_type==='crypto')),stocks=computed(()=>items.value.filter(x=>x.asset_type!=='crypto'))
-const inWatchlist=computed(()=>selected.value&&watchlist.value.some(x=>x.symbol===selected.value?.symbol&&x.asset_type===selected.value?.asset_type))
-const periods=['1m','5m','15m','30m','1h','4h','1d']
-function price(value:number|null|undefined,currency=''){if(value==null)return '—';return `${currency==='CNY'?'¥':'$'}${value.toLocaleString('zh-CN',{maximumFractionDigits:value<10?4:2})}`}
-function compact(value:number|null|undefined){if(value==null)return '—';return Intl.NumberFormat('zh-CN',{notation:'compact',maximumFractionDigits:2}).format(value)}
-function trendClass(value:number|null|undefined){return (value||0)>=0?'positive':'negative'}
-async function loadHome(){loading.value=true;error.value='';try{const [overview,health]=await Promise.all([fetch('/api/market/overview').then(r=>r.json()),fetch('/api/health').then(r=>r.json())]);items.value=overview.items||[];appVersion.value=health.version||appVersion.value;lastUpdate.value=new Date().toLocaleTimeString('zh-CN');await loadWatchlist()}catch(e){error.value=e instanceof Error?e.message:'行情数据获取失败'}finally{loading.value=false}}
-async function searchAssets(){const q=query.value.trim();if(!q)return;searching.value=true;searchError.value='';searchOpen.value=true;try{const [s,c]=await Promise.allSettled([request<Asset[]>(`/api/market/stock/search?q=${encodeURIComponent(q)}`),request<Asset[]>(`/api/market/crypto/search?q=${encodeURIComponent(q)}`)]);searchResults.value=[...(s.status==='fulfilled'?s.value:[]),...(c.status==='fulfilled'?c.value:[])];if(!searchResults.value.length)searchError.value='没有找到匹配资产，请检查名称或代码'}catch(e){searchError.value=e instanceof Error?e.message:'数据获取失败'}finally{searching.value=false}}
-async function openAsset(asset:Asset,action?:'ai'|'backtest'){selected.value=asset;page.value='detail';searchOpen.value=false;quote.value=null;candles.value=[];indicators.value=null;aiResult.value=null;backtestResult.value=null;interval.value=asset.asset_type==='crypto'?'1h':'1d';await Promise.all([loadQuote(),loadKline()]);if(action==='ai')await runAI();if(action==='backtest')await nextTick()}
-async function loadQuote(){if(!selected.value)return;try{quote.value=await request<Quote>(`/api/market/${selected.value.asset_type}/quote?symbol=${encodeURIComponent(selected.value.symbol)}`)}catch(e){detailError.value=e instanceof Error?e.message:'行情数据获取失败'}}
-async function loadKline(){if(!selected.value)return;detailLoading.value=true;detailError.value='';try{const data=await request<any>(`/api/market/${selected.value.asset_type}/kline?symbol=${encodeURIComponent(selected.value.symbol)}&interval=${interval.value}&limit=500`);candles.value=data.candles;indicators.value=data.indicators}catch(e){detailError.value=e instanceof Error?e.message:'K线数据获取失败'}finally{detailLoading.value=false}}
-async function changeInterval(value:string){interval.value=value;aiResult.value=null;await loadKline()}
-async function runAI(){if(!selected.value)return;aiLoading.value=true;aiResult.value=null;try{aiResult.value=await post<any>('/api/ai/predict',{symbol:selected.value.symbol,asset_type:selected.value.asset_type,interval:interval.value});ElMessage.success('真实模型训练与预测完成')}catch(e){ElMessage.error(e instanceof Error?e.message:'AI预测失败')}finally{aiLoading.value=false}}
-async function runBacktest(){if(!selected.value)return;backtestLoading.value=true;backtestResult.value=null;try{backtestResult.value=await post<any>('/api/backtest/run',{symbol:selected.value.symbol,asset_type:selected.value.asset_type,interval:interval.value,strategy:strategy.value,initial_cash:initialCash.value,limit:500});ElMessage.success('历史回测完成')}catch(e){ElMessage.error(e instanceof Error?e.message:'回测失败')}finally{backtestLoading.value=false}}
-async function loadWatchlist(){const data=await request<any[]>('/api/watchlist');watchlist.value=data}
-async function toggleWatch(){if(!selected.value)return;try{if(inWatchlist.value)await request(`/api/watchlist/${selected.value.symbol}`,{method:'DELETE'});else await post('/api/watchlist',{symbol:selected.value.symbol,asset_type:selected.value.asset_type,name:selected.value.name});await loadWatchlist();ElMessage.success(inWatchlist.value?'已加入自选':'已移出自选')}catch(e){ElMessage.error(e instanceof Error?e.message:'自选操作失败')}}
-async function placeOrder(side:'BUY'|'SELL',amount=orderAmount.value){if(!selected.value)return;orderLoading.value=true;try{await post('/api/paper/order',{symbol:selected.value.symbol,asset_type:selected.value.asset_type,side,amount});ElMessage.success(`模拟${side==='BUY'?'买入':'卖出'}已按实时价成交`);await loadPaper()}catch(e){ElMessage.error(e instanceof Error?e.message:'模拟订单失败')}finally{orderLoading.value=false}}
-async function loadPaper(){paperLoading.value=true;try{[paperAccounts.value,positions.value,orders.value]=await Promise.all([request<any[]>('/api/paper/account'),request<any[]>('/api/paper/positions'),request<any[]>('/api/paper/orders')])}catch(e){ElMessage.error(e instanceof Error?e.message:'账户数据获取失败')}finally{paperLoading.value=false}}
-async function showPaper(){page.value='paper';await loadPaper()}
-async function showWatchlist(){page.value='watchlist';await loadWatchlist()}
-async function sellAll(position:any){selected.value={symbol:position.symbol,name:position.symbol,asset_type:position.asset_type};orderLoading.value=true;try{await post('/api/paper/order',{symbol:position.symbol,asset_type:position.asset_type,side:'SELL',quantity:position.quantity});ElMessage.success('已按实时价全部卖出');await loadPaper()}catch(e){ElMessage.error(e instanceof Error?e.message:'卖出失败')}finally{orderLoading.value=false}}
-async function checkUpdates(){if(!window.desktopUpdater){ElMessage.info('请在 Windows 桌面客户端中检查更新');return}updateChecking.value=true;updateStatus.value='正在检查更新…';try{const result=await window.desktopUpdater.check();updateStatus.value=result.status==='current'?'当前已经是最新版本。':result.status==='not-configured'?'尚未配置真实 GitHub 更新仓库。':result.status==='network-error'?'暂时无法检查更新，请稍后重试。':result.status==='installing'?'正在安装更新，软件将自动重启。':result.status==='later'?'已选择稍后提醒。':result.status==='bad-release'?'已阻止曾启动失败的问题版本。':'更新检查已完成。'}catch{updateStatus.value='暂时无法检查更新，请稍后重试。'}finally{updateChecking.value=false}}
-function nav(target:'home'|'market'|'ai'|'backtest'|'paper'|'watchlist'|'settings'){if(target==='home'){page.value='home';loadHome()}else if(target==='market'){page.value='home';nextTick(()=>document.querySelector<HTMLInputElement>('.search input')?.focus())}else if(target==='paper')showPaper();else if(target==='watchlist')showWatchlist();else if(target==='settings')page.value='settings';else openAsset({symbol:'BTC',name:'比特币',asset_type:'crypto'},target)}
-onMounted(loadHome)
+type Page = "home" | "detail" | "paper" | "watchlist" | "settings";
+const page = ref<Page>("home"),
+  items = ref<Asset[]>([]),
+  appVersion = ref("0.3.0"),
+  loading = ref(false),
+  error = ref(""),
+  lastUpdate = ref("");
+const query = ref(""),
+  searching = ref(false),
+  searchError = ref(""),
+  searchResults = ref<Asset[]>([]),
+  searchOpen = ref(false);
+const selected = ref<Asset | null>(null),
+  quote = ref<Quote | null>(null),
+  candles = ref<Candle[]>([]),
+  indicators = ref<IndicatorSet | null>(null),
+  interval = ref("1h"),
+  detailLoading = ref(false),
+  detailError = ref("");
+const aiLoading = ref(false),
+  aiResult = ref<any>(null),
+  backtestLoading = ref(false),
+  backtestResult = ref<any>(null),
+  strategy = ref("ma"),
+  initialCash = ref(10000);
+const marketContext = ref<any>(null),
+  predictionStats = ref<any>(null),
+  portfolioRisk = ref<any>(null),
+  accountEquity = ref(100000),
+  maxRiskPercent = ref(1),
+  leverage = ref(1);
+const orderAmount = ref(1000),
+  orderLoading = ref(false),
+  watchlist = ref<any[]>([]),
+  paperAccounts = ref<any[]>([]),
+  positions = ref<any[]>([]),
+  orders = ref<any[]>([]),
+  paperLoading = ref(false);
+const updateChecking = ref(false),
+  updateStatus = ref("启动时会自动检查更新；也可以在这里手动检查。");
+const cryptos = computed(() =>
+    items.value.filter((x) => x.asset_type === "crypto"),
+  ),
+  stocks = computed(() => items.value.filter((x) => x.asset_type !== "crypto"));
+const inWatchlist = computed(
+  () =>
+    selected.value &&
+    watchlist.value.some(
+      (x) =>
+        x.symbol === selected.value?.symbol &&
+        x.asset_type === selected.value?.asset_type,
+    ),
+);
+const periods = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
+function price(value: number | null | undefined, currency = "") {
+  if (value == null) return "—";
+  return `${currency === "CNY" ? "¥" : "$"}${value.toLocaleString("zh-CN", { maximumFractionDigits: value < 10 ? 4 : 2 })}`;
+}
+function compact(value: number | null | undefined) {
+  if (value == null) return "—";
+  return Intl.NumberFormat("zh-CN", {
+    notation: "compact",
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+function trendClass(value: number | null | undefined) {
+  return (value || 0) >= 0 ? "positive" : "negative";
+}
+function probability(value: number | null | undefined) {
+  return `${((value || 0) * 100).toFixed(1)}%`;
+}
+function availabilityLabel(status: any) {
+  return status?.available
+    ? "可用"
+    : status?.applicable === false
+      ? "不适用"
+      : "暂无数据";
+}
+function rotationSymbols(items: any[]) {
+  return (items || [])
+    .slice(0, 3)
+    .map((item: any) => item.symbol)
+    .join(" → ");
+}
+async function loadHome() {
+  loading.value = true;
+  error.value = "";
+  try {
+    const [overview, health, context] = await Promise.all([
+      fetch("/api/market/overview").then((r) => r.json()),
+      fetch("/api/health").then((r) => r.json()),
+      request<any>("/api/ai/market-context").catch(() => null),
+    ]);
+    items.value = overview.items || [];
+    appVersion.value = health.version || appVersion.value;
+    marketContext.value = context;
+    lastUpdate.value = new Date().toLocaleTimeString("zh-CN");
+    await loadWatchlist();
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "行情数据获取失败";
+  } finally {
+    loading.value = false;
+  }
+}
+async function searchAssets() {
+  const q = query.value.trim();
+  if (!q) return;
+  searching.value = true;
+  searchError.value = "";
+  searchOpen.value = true;
+  try {
+    const [s, c] = await Promise.allSettled([
+      request<Asset[]>(`/api/market/stock/search?q=${encodeURIComponent(q)}`),
+      request<Asset[]>(`/api/market/crypto/search?q=${encodeURIComponent(q)}`),
+    ]);
+    searchResults.value = [
+      ...(s.status === "fulfilled" ? s.value : []),
+      ...(c.status === "fulfilled" ? c.value : []),
+    ];
+    if (!searchResults.value.length)
+      searchError.value = "没有找到匹配资产，请检查名称或代码";
+  } catch (e) {
+    searchError.value = e instanceof Error ? e.message : "数据获取失败";
+  } finally {
+    searching.value = false;
+  }
+}
+async function openAsset(asset: Asset, action?: "ai" | "backtest") {
+  selected.value = asset;
+  page.value = "detail";
+  searchOpen.value = false;
+  quote.value = null;
+  candles.value = [];
+  indicators.value = null;
+  aiResult.value = null;
+  backtestResult.value = null;
+  interval.value = asset.asset_type === "crypto" ? "1h" : "1d";
+  await Promise.all([loadQuote(), loadKline()]);
+  if (action === "ai") await runAI();
+  if (action === "backtest") await nextTick();
+}
+async function loadQuote() {
+  if (!selected.value) return;
+  try {
+    quote.value = await request<Quote>(
+      `/api/market/${selected.value.asset_type}/quote?symbol=${encodeURIComponent(selected.value.symbol)}`,
+    );
+  } catch (e) {
+    detailError.value = e instanceof Error ? e.message : "行情数据获取失败";
+  }
+}
+async function loadKline() {
+  if (!selected.value) return;
+  detailLoading.value = true;
+  detailError.value = "";
+  try {
+    const data = await request<any>(
+      `/api/market/${selected.value.asset_type}/kline?symbol=${encodeURIComponent(selected.value.symbol)}&interval=${interval.value}&limit=500`,
+    );
+    candles.value = data.candles;
+    indicators.value = data.indicators;
+  } catch (e) {
+    detailError.value = e instanceof Error ? e.message : "K线数据获取失败";
+  } finally {
+    detailLoading.value = false;
+  }
+}
+async function changeInterval(value: string) {
+  interval.value = value;
+  aiResult.value = null;
+  await loadKline();
+}
+async function runAI() {
+  if (!selected.value) return;
+  aiLoading.value = true;
+  aiResult.value = null;
+  try {
+    aiResult.value = await post<any>("/api/ai/decision", {
+      symbol: selected.value.symbol,
+      asset_type: selected.value.asset_type,
+      interval: interval.value,
+      account_equity: accountEquity.value,
+      max_risk_percent: maxRiskPercent.value / 100,
+      leverage: leverage.value,
+    });
+    predictionStats.value = await request<any>("/api/ai/statistics").catch(
+      () => null,
+    );
+    portfolioRisk.value = await request<any>("/api/ai/portfolio-risk").catch(
+      () => null,
+    );
+    ElMessage.success("V4 量化研究审计与交易决策完成");
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : "AI预测失败");
+  } finally {
+    aiLoading.value = false;
+  }
+}
+async function runBacktest() {
+  if (!selected.value) return;
+  backtestLoading.value = true;
+  backtestResult.value = null;
+  try {
+    backtestResult.value = await post<any>("/api/backtest/run", {
+      symbol: selected.value.symbol,
+      asset_type: selected.value.asset_type,
+      interval: interval.value,
+      strategy: strategy.value,
+      initial_cash: initialCash.value,
+      limit: 1000,
+      slippage_rate: 0.0005,
+    });
+    ElMessage.success("历史回测完成");
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : "回测失败");
+  } finally {
+    backtestLoading.value = false;
+  }
+}
+async function loadWatchlist() {
+  const data = await request<any[]>("/api/watchlist");
+  watchlist.value = data;
+}
+async function toggleWatch() {
+  if (!selected.value) return;
+  try {
+    if (inWatchlist.value)
+      await request(`/api/watchlist/${selected.value.symbol}`, {
+        method: "DELETE",
+      });
+    else
+      await post("/api/watchlist", {
+        symbol: selected.value.symbol,
+        asset_type: selected.value.asset_type,
+        name: selected.value.name,
+      });
+    await loadWatchlist();
+    ElMessage.success(inWatchlist.value ? "已加入自选" : "已移出自选");
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : "自选操作失败");
+  }
+}
+async function placeOrder(side: "BUY" | "SELL", amount = orderAmount.value) {
+  if (!selected.value) return;
+  orderLoading.value = true;
+  try {
+    await post("/api/paper/order", {
+      symbol: selected.value.symbol,
+      asset_type: selected.value.asset_type,
+      side,
+      amount,
+    });
+    ElMessage.success(`模拟${side === "BUY" ? "买入" : "卖出"}已按实时价成交`);
+    await loadPaper();
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : "模拟订单失败");
+  } finally {
+    orderLoading.value = false;
+  }
+}
+async function loadPaper() {
+  paperLoading.value = true;
+  try {
+    [paperAccounts.value, positions.value, orders.value] = await Promise.all([
+      request<any[]>("/api/paper/account"),
+      request<any[]>("/api/paper/positions"),
+      request<any[]>("/api/paper/orders"),
+    ]);
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : "账户数据获取失败");
+  } finally {
+    paperLoading.value = false;
+  }
+}
+async function showPaper() {
+  page.value = "paper";
+  await loadPaper();
+}
+async function showWatchlist() {
+  page.value = "watchlist";
+  await loadWatchlist();
+}
+async function sellAll(position: any) {
+  selected.value = {
+    symbol: position.symbol,
+    name: position.symbol,
+    asset_type: position.asset_type,
+  };
+  orderLoading.value = true;
+  try {
+    await post("/api/paper/order", {
+      symbol: position.symbol,
+      asset_type: position.asset_type,
+      side: "SELL",
+      quantity: position.quantity,
+    });
+    ElMessage.success("已按实时价全部卖出");
+    await loadPaper();
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : "卖出失败");
+  } finally {
+    orderLoading.value = false;
+  }
+}
+async function checkUpdates() {
+  if (!window.desktopUpdater) {
+    ElMessage.info("请在 Windows 桌面客户端中检查更新");
+    return;
+  }
+  updateChecking.value = true;
+  updateStatus.value = "正在检查更新…";
+  try {
+    const result = await window.desktopUpdater.check();
+    updateStatus.value =
+      result.status === "current"
+        ? "当前已经是最新版本。"
+        : result.status === "not-configured"
+          ? "尚未配置真实 GitHub 更新仓库。"
+          : result.status === "network-error"
+            ? "暂时无法检查更新，请稍后重试。"
+            : result.status === "installing"
+              ? "正在安装更新，软件将自动重启。"
+              : result.status === "later"
+                ? "已选择稍后提醒。"
+                : result.status === "bad-release"
+                  ? "已阻止曾启动失败的问题版本。"
+                  : "更新检查已完成。";
+  } catch {
+    updateStatus.value = "暂时无法检查更新，请稍后重试。";
+  } finally {
+    updateChecking.value = false;
+  }
+}
+function nav(
+  target:
+    "home" | "market" | "ai" | "backtest" | "paper" | "watchlist" | "settings",
+) {
+  if (target === "home") {
+    page.value = "home";
+    loadHome();
+  } else if (target === "market") {
+    page.value = "home";
+    nextTick(() =>
+      document.querySelector<HTMLInputElement>(".search input")?.focus(),
+    );
+  } else if (target === "paper") showPaper();
+  else if (target === "watchlist") showWatchlist();
+  else if (target === "settings") page.value = "settings";
+  else
+    openAsset({ symbol: "BTC", name: "比特币", asset_type: "crypto" }, target);
+}
+onMounted(loadHome);
 </script>
 
-<template><div class="shell"><aside><div class="brand"><div class="logo">AI</div><div><b>AI行情助手</b><small>版本 v{{appVersion}}</small></div></div><nav>
-  <button :class="{active:page==='home'}" @click="nav('home')"><el-icon><HomeFilled/></el-icon>首页</button>
-  <button @click="nav('market')"><el-icon><TrendCharts/></el-icon>行情搜索</button>
-  <button @click="nav('ai')"><el-icon><DataAnalysis/></el-icon>AI 预测</button>
-  <button @click="nav('backtest')"><el-icon><Wallet/></el-icon>回测</button>
-  <button :class="{active:page==='paper'}" @click="nav('paper')"><el-icon><Wallet/></el-icon>模拟交易</button>
-  <button :class="{active:page==='watchlist'}" @click="nav('watchlist')"><el-icon><Star/></el-icon>自选</button>
-  <button :class="{active:page==='settings'}" @click="nav('settings')"><el-icon><Setting/></el-icon>设置与更新</button>
-</nav><div class="risk"><b>研究与模拟模式</b><p>概率预测和历史回测不构成投资建议，不连接真实交易账户。</p></div></aside>
-<main><header><div><h1>{{page==='detail'?(selected?assetLabel(selected):'资产详情'):page==='paper'?'模拟交易账户':page==='watchlist'?'我的自选':page==='settings'?'设置与更新':'市场概览'}}</h1><p>{{page==='detail'?'真实行情、指标、模型、回测与模拟交易':page==='home'?'真实公开行情 · 数据源故障自动切换':page==='settings'?'版本、更新状态与用户数据位置':'数据持久化保存在本机'}}</p></div><button v-if="page!=='settings'" class="refresh" @click="page==='home'?loadHome():page==='paper'?loadPaper():page==='detail'?(loadQuote(),loadKline()):loadWatchlist()"><el-icon :class="{spin:loading||detailLoading||paperLoading}"><Refresh/></el-icon>刷新</button></header>
+<template>
+  <div class="shell">
+    <aside>
+      <div class="brand">
+        <div class="logo">AI</div>
+        <div>
+          <b>AI行情助手</b><small>版本 v{{ appVersion }}</small>
+        </div>
+      </div>
+      <nav>
+        <button :class="{ active: page === 'home' }" @click="nav('home')">
+          <el-icon><HomeFilled /></el-icon>首页
+        </button>
+        <button @click="nav('market')">
+          <el-icon><TrendCharts /></el-icon>行情搜索
+        </button>
+        <button @click="nav('ai')">
+          <el-icon><DataAnalysis /></el-icon>AI 预测
+        </button>
+        <button @click="nav('backtest')">
+          <el-icon><Wallet /></el-icon>回测
+        </button>
+        <button :class="{ active: page === 'paper' }" @click="nav('paper')">
+          <el-icon><Wallet /></el-icon>模拟交易
+        </button>
+        <button
+          :class="{ active: page === 'watchlist' }"
+          @click="nav('watchlist')"
+        >
+          <el-icon><Star /></el-icon>自选
+        </button>
+        <button
+          :class="{ active: page === 'settings' }"
+          @click="nav('settings')"
+        >
+          <el-icon><Setting /></el-icon>设置与更新
+        </button>
+      </nav>
+      <div class="risk">
+        <b>研究与模拟模式</b>
+        <p>概率预测和历史回测不构成投资建议，不连接真实交易账户。</p>
+      </div>
+    </aside>
+    <main>
+      <header>
+        <div>
+          <h1>
+            {{
+              page === "detail"
+                ? selected
+                  ? assetLabel(selected)
+                  : "资产详情"
+                : page === "paper"
+                  ? "模拟交易账户"
+                  : page === "watchlist"
+                    ? "我的自选"
+                    : page === "settings"
+                      ? "设置与更新"
+                      : "市场概览"
+            }}
+          </h1>
+          <p>
+            {{
+              page === "detail"
+                ? "真实行情、指标、模型、回测与模拟交易"
+                : page === "home"
+                  ? "真实公开行情 · 数据源故障自动切换"
+                  : page === "settings"
+                    ? "版本、更新状态与用户数据位置"
+                    : "数据持久化保存在本机"
+            }}
+          </p>
+        </div>
+        <button
+          v-if="page !== 'settings'"
+          class="refresh"
+          @click="
+            page === 'home'
+              ? loadHome()
+              : page === 'paper'
+                ? loadPaper()
+                : page === 'detail'
+                  ? (loadQuote(), loadKline())
+                  : loadWatchlist()
+          "
+        >
+          <el-icon :class="{ spin: loading || detailLoading || paperLoading }"
+            ><Refresh /></el-icon
+          >刷新
+        </button>
+      </header>
 
-<div class="search"><el-icon><Search/></el-icon><input v-model="query" @keyup.enter="searchAssets" @input="searchOpen=false" placeholder="输入贵州茅台、600519、BTC、ETH/USDT…"/><button @click="searchAssets" :disabled="searching">{{searching?'加载中…':'搜索'}}</button>
-  <div v-if="searchOpen" class="search-results"><div v-if="searching" class="search-state">正在查询真实数据源…</div><template v-else><button v-for="asset in searchResults" :key="asset.asset_type+asset.symbol" @click="openAsset(asset)"><span>{{asset.asset_type==='crypto'?asset.pair:asset.name}}</span><small>{{asset.symbol}} · {{asset.source}}</small></button><div v-if="searchError" class="search-state error">{{searchError}} <a @click="searchAssets">重试</a></div></template></div>
-</div>
+      <div class="search">
+        <el-icon><Search /></el-icon
+        ><input
+          v-model="query"
+          @keyup.enter="searchAssets"
+          @input="searchOpen = false"
+          placeholder="输入贵州茅台、600519、BTC、ETH/USDT…"
+        /><button @click="searchAssets" :disabled="searching">
+          {{ searching ? "加载中…" : "搜索" }}
+        </button>
+        <div v-if="searchOpen" class="search-results">
+          <div v-if="searching" class="search-state">正在查询真实数据源…</div>
+          <template v-else
+            ><button
+              v-for="asset in searchResults"
+              :key="asset.asset_type + asset.symbol"
+              @click="openAsset(asset)"
+            >
+              <span>{{
+                asset.asset_type === "crypto" ? asset.pair : asset.name
+              }}</span
+              ><small>{{ asset.symbol }} · {{ asset.source }}</small>
+            </button>
+            <div v-if="searchError" class="search-state error">
+              {{ searchError }} <a @click="searchAssets">重试</a>
+            </div></template
+          >
+        </div>
+      </div>
 
-<template v-if="page==='home'"><el-alert v-if="error" :title="error" type="error" show-icon :closable="false"><button @click="loadHome">重试</button></el-alert><section class="hero"><div><span class="eyebrow">REAL MARKET DATA</span><h2>每一张卡片，都能打开真实分析。</h2><p>点击资产进入 K线、技术指标、AI预测、回测与模拟交易。模型概率不会预先写入页面。</p></div><div class="pulse"><i></i><span>可用行情</span><b>{{items.filter(x=>x.available).length}} / {{items.length}}</b></div></section>
-<section><div class="title-row"><div><h3>数字资产</h3><p>公开交易所 API · 点击查看详情</p></div></div><div class="grid"><button v-for="x in cryptos" :key="x.symbol" class="card" @click="openAsset(x)"><div class="asset"><div class="coin">{{x.symbol[0]}}</div><div><b>{{x.symbol}} / USDT</b><small>{{x.name}} · {{x.source||'数据源不可用'}}</small></div></div><div class="price">{{price(x.price,'USDT')}}</div><div :class="['change',trendClass(x.change_percent)]">{{(x.change_percent||0)>=0?'+':''}}{{x.change_percent?.toFixed(2)}}%</div><div class="card-action">查看真实 K线与分析 →</div></button></div></section>
-<section><div class="title-row"><div><h3>A 股市场</h3><p>指数与自选股票 · 点击查看详情</p></div></div><div class="grid"><button v-for="x in stocks" :key="x.symbol" class="card compact" @click="openAsset(x)"><div class="asset"><div class="stock">{{x.name[0]}}</div><div><b>{{x.name}}</b><small>{{x.symbol}} · {{x.source||'数据源不可用'}}</small></div></div><div class="price">{{price(x.price,'CNY')}}</div><div :class="['change',trendClass(x.change_percent)]">{{(x.change_percent||0)>=0?'+':''}}{{x.change_percent?.toFixed(2)}}%</div><div class="card-action">查看真实 K线与分析 →</div></button></div></section></template>
+      <template v-if="page === 'home'"
+        ><el-alert
+          v-if="error"
+          :title="error"
+          type="error"
+          show-icon
+          :closable="false"
+          ><button @click="loadHome">重试</button></el-alert
+        >
+        <section class="hero">
+          <div>
+            <span class="eyebrow">REAL MARKET DATA</span>
+            <h2>每一张卡片，都能打开真实分析。</h2>
+            <p>
+              点击资产进入
+              K线、技术指标、AI预测、回测与模拟交易。模型概率不会预先写入页面。
+            </p>
+          </div>
+          <div class="pulse">
+            <i></i><span>可用行情</span
+            ><b
+              >{{ items.filter((x) => x.available).length }} /
+              {{ items.length }}</b
+            >
+          </div>
+        </section>
+        <section v-if="marketContext" class="panel market-center">
+          <div>
+            <span class="eyebrow">LIVE MARKET CONTEXT</span>
+            <h2>{{ marketContext.market_regime.risk_mode }}</h2>
+            <p>
+              市场状态 {{ marketContext.market_regime.primary }} · 波动
+              {{ marketContext.market_regime.volatility }} · 流动性
+              {{ marketContext.market_regime.liquidity }}
+            </p>
+          </div>
+          <div>
+            <span>资金方向</span
+            ><b>{{ marketContext.capital_flow.direction }}</b
+            ><small
+              >真实 OHLCV 代理比率
+              {{
+                probability(marketContext.capital_flow.net_flow_ratio)
+              }}</small
+            >
+          </div>
+          <div>
+            <span>资金轮动</span
+            ><b>{{
+              rotationSymbols(marketContext.capital_rotation)
+            }}</b
+            ><small>按真实收益与量价流排序</small>
+          </div>
+          <div
+            :class="[
+              'risk-badge',
+              marketContext.risk_alerts.length ? 'warning' : '',
+            ]"
+          >
+            <span>风险预警</span
+            ><b>{{
+              marketContext.risk_alerts.length
+                ? "市场状态可能变化"
+                : "暂无量价异常"
+            }}</b
+            ><small>事件日历 {{ marketContext.event_risk.status }}</small>
+          </div>
+        </section>
+        <section>
+          <div class="title-row">
+            <div>
+              <h3>数字资产</h3>
+              <p>公开交易所 API · 点击查看详情</p>
+            </div>
+          </div>
+          <div class="grid">
+            <button
+              v-for="x in cryptos"
+              :key="x.symbol"
+              class="card"
+              @click="openAsset(x)"
+            >
+              <div class="asset">
+                <div class="coin">{{ x.symbol[0] }}</div>
+                <div>
+                  <b>{{ x.symbol }} / USDT</b
+                  ><small
+                    >{{ x.name }} · {{ x.source || "数据源不可用" }}</small
+                  >
+                </div>
+              </div>
+              <div class="price">{{ price(x.price, "USDT") }}</div>
+              <div :class="['change', trendClass(x.change_percent)]">
+                {{ (x.change_percent || 0) >= 0 ? "+" : ""
+                }}{{ x.change_percent?.toFixed(2) }}%
+              </div>
+              <div class="card-action">查看真实 K线与分析 →</div>
+            </button>
+          </div>
+        </section>
+        <section>
+          <div class="title-row">
+            <div>
+              <h3>A 股市场</h3>
+              <p>指数与自选股票 · 点击查看详情</p>
+            </div>
+          </div>
+          <div class="grid">
+            <button
+              v-for="x in stocks"
+              :key="x.symbol"
+              class="card compact"
+              @click="openAsset(x)"
+            >
+              <div class="asset">
+                <div class="stock">{{ x.name[0] }}</div>
+                <div>
+                  <b>{{ x.name }}</b
+                  ><small
+                    >{{ x.symbol }} · {{ x.source || "数据源不可用" }}</small
+                  >
+                </div>
+              </div>
+              <div class="price">{{ price(x.price, "CNY") }}</div>
+              <div :class="['change', trendClass(x.change_percent)]">
+                {{ (x.change_percent || 0) >= 0 ? "+" : ""
+                }}{{ x.change_percent?.toFixed(2) }}%
+              </div>
+              <div class="card-action">查看真实 K线与分析 →</div>
+            </button>
+          </div>
+        </section></template
+      >
 
-<template v-else-if="page==='detail'"><el-alert v-if="detailError" :title="detailError" type="error" show-icon :closable="false"><button @click="loadKline">重试</button></el-alert><section v-if="selected" class="detail-head"><div><span class="eyebrow">{{selected.asset_type==='crypto'?'CRYPTO':'A-SHARE'}}</span><h2>{{selected.name}} <small>{{selected.asset_type==='crypto'?selected.symbol+'/USDT':selected.symbol}}</small></h2><div class="big-price">{{price(quote?.price,quote?.currency)}} <span :class="trendClass(quote?.change_percent)">{{(quote?.change_percent||0)>=0?'+':''}}{{quote?.change_percent?.toFixed(2)}}%</span></div><p>{{quote?.source||'正在连接数据源'}} · {{quote?.updated_at?.replace('T',' ').slice(0,19)}}</p></div><div class="head-actions"><button @click="toggleWatch">{{inWatchlist?'★ 已收藏':'☆ 加入自选'}}</button><button class="primary" @click="runAI" :disabled="aiLoading">{{aiLoading?'训练模型中…':'AI预测'}}</button></div></section>
-<div v-if="quote" class="stats"><div><span>开盘</span><b>{{price(quote.open,quote.currency)}}</b></div><div><span>昨收/24H开盘</span><b>{{price(quote.previous_close??quote.open,quote.currency)}}</b></div><div><span>最高</span><b>{{price(quote.high,quote.currency)}}</b></div><div><span>最低</span><b>{{price(quote.low,quote.currency)}}</b></div><div><span>成交量</span><b>{{compact(quote.volume)}}</b></div><div><span>成交额</span><b>{{compact(quote.amount)}}</b></div></div>
-<section class="panel"><div class="panel-top"><h3>真实 K线与成交量</h3><div class="periods"><button v-for="p in periods" :key="p" :class="{active:interval===p}" @click="changeInterval(p)" :disabled="detailLoading">{{p.toUpperCase()}}</button></div></div><div v-if="detailLoading" class="loading-box">正在获取 {{interval.toUpperCase()}} 真实 K线…</div><KlineChart v-else :candles="candles" :indicators="indicators"/></section>
-<section v-if="indicators" class="panel"><div class="panel-top"><h3>实时计算技术指标</h3><span class="score">综合 {{indicators.score}} / 100</span></div><div class="indicator-grid"><div><span>MA5 / MA20</span><b>{{indicators.latest.ma5?.toFixed(2)}} / {{indicators.latest.ma20?.toFixed(2)}}</b></div><div><span>EMA12 / EMA26</span><b>{{indicators.latest.ema12?.toFixed(2)}} / {{indicators.latest.ema26?.toFixed(2)}}</b></div><div><span>MACD</span><b>{{indicators.latest.macd?.toFixed(4)}}</b></div><div><span>RSI(14)</span><b>{{indicators.latest.rsi?.toFixed(2)}}</b></div><div><span>K / D / J</span><b>{{indicators.latest.kdj_k?.toFixed(1)}} / {{indicators.latest.kdj_d?.toFixed(1)}} / {{indicators.latest.kdj_j?.toFixed(1)}}</b></div><div><span>BOLL 上/中/下</span><b>{{indicators.latest.boll_upper?.toFixed(2)}} / {{indicators.latest.boll_mid?.toFixed(2)}} / {{indicators.latest.boll_lower?.toFixed(2)}}</b></div><div><span>ATR</span><b>{{indicators.latest.atr?.toFixed(3)}}</b></div><div><span>OBV</span><b>{{compact(indicators.latest.obv)}}</b></div></div></section>
-<section class="two-col"><div class="panel"><div class="panel-top"><h3>AI 概率预测</h3><button class="primary" @click="runAI" :disabled="aiLoading">{{aiLoading?'时间序列训练中…':'开始真实预测'}}</button></div><div v-if="!aiResult" class="empty">点击后将用当前真实 K线训练 Random Forest，不会返回写死概率。</div><template v-else><div class="prediction-grid"><div v-for="(p,h) in aiResult.predictions" :key="h"><span>未来 {{h}}</span><b>{{p.trend}}</b><small>涨 {{p.prob_up}}% · 震 {{p.prob_flat}}% · 跌 {{p.prob_down}}%</small><em>Walk Forward {{p.walk_forward_accuracy}}% / {{p.walk_forward_samples}}样本</em></div></div><div class="model-info">模型：{{aiResult.model.name}} · {{aiResult.model.training_samples}} 条训练样本<br>{{aiResult.model.split}}<br>数据时间：{{aiResult.data_time}}</div></template></div>
-<div class="panel"><div class="panel-top"><h3>历史回测</h3><button class="primary" @click="runBacktest" :disabled="backtestLoading">{{backtestLoading?'运行中…':'开始回测'}}</button></div><div class="form-row"><select v-model="strategy"><option value="ma">MA 金叉/死叉</option><option value="macd">MACD</option><option value="rsi">RSI</option><option value="ai">AI 趋势</option><option value="ai_technical">AI + 技术指标</option></select><input v-model.number="initialCash" type="number" min="100"/><span>初始资金</span></div><div v-if="backtestResult" class="backtest-metrics"><div><span>最终资金</span><b>{{backtestResult.final_cash}}</b></div><div><span>收益率</span><b :class="trendClass(backtestResult.return_percent)">{{backtestResult.return_percent}}%</b></div><div><span>最大回撤</span><b>{{backtestResult.max_drawdown_percent}}%</b></div><div><span>胜率</span><b>{{backtestResult.win_rate_percent}}%</b></div><div><span>交易次数</span><b>{{backtestResult.trade_count}}</b></div><div><span>盈亏比</span><b>{{backtestResult.profit_loss_ratio??'—'}}</b></div></div><EquityChart v-if="backtestResult" :curve="backtestResult.equity_curve"/><div v-else class="empty">选择策略后使用当前周期真实历史行情回测。</div></div></section>
-<section class="panel trade-panel"><div><h3>模拟交易</h3><p>成交价格由当前实时行情 API 决定，手续费自动记录。</p></div><input v-model.number="orderAmount" type="number" min="1"/><span>{{selected?.asset_type==='crypto'?'USDT':'CNY'}} 金额</span><button class="buy" @click="placeOrder('BUY')" :disabled="orderLoading">模拟买入</button><button class="sell" @click="placeOrder('SELL')" :disabled="orderLoading">模拟卖出</button></section></template>
+      <template v-else-if="page === 'detail'"
+        ><el-alert
+          v-if="detailError"
+          :title="detailError"
+          type="error"
+          show-icon
+          :closable="false"
+          ><button @click="loadKline">重试</button></el-alert
+        >
+        <section v-if="selected" class="detail-head">
+          <div>
+            <span class="eyebrow">{{
+              selected.asset_type === "crypto" ? "CRYPTO" : "A-SHARE"
+            }}</span>
+            <h2>
+              {{ selected.name }}
+              <small>{{
+                selected.asset_type === "crypto"
+                  ? selected.symbol + "/USDT"
+                  : selected.symbol
+              }}</small>
+            </h2>
+            <div class="big-price">
+              {{ price(quote?.price, quote?.currency) }}
+              <span :class="trendClass(quote?.change_percent)"
+                >{{ (quote?.change_percent || 0) >= 0 ? "+" : ""
+                }}{{ quote?.change_percent?.toFixed(2) }}%</span
+              >
+            </div>
+            <p>
+              {{ quote?.source || "正在连接数据源" }} ·
+              {{ quote?.updated_at?.replace("T", " ").slice(0, 19) }}
+            </p>
+          </div>
+          <div class="head-actions">
+            <button @click="toggleWatch">
+              {{ inWatchlist ? "★ 已收藏" : "☆ 加入自选" }}</button
+            ><button class="primary" @click="runAI" :disabled="aiLoading">
+              {{ aiLoading ? "训练模型中…" : "AI预测" }}
+            </button>
+          </div>
+        </section>
+        <div v-if="quote" class="stats">
+          <div>
+            <span>开盘</span><b>{{ price(quote.open, quote.currency) }}</b>
+          </div>
+          <div>
+            <span>昨收/24H开盘</span
+            ><b>{{
+              price(quote.previous_close ?? quote.open, quote.currency)
+            }}</b>
+          </div>
+          <div>
+            <span>最高</span><b>{{ price(quote.high, quote.currency) }}</b>
+          </div>
+          <div>
+            <span>最低</span><b>{{ price(quote.low, quote.currency) }}</b>
+          </div>
+          <div>
+            <span>成交量</span><b>{{ compact(quote.volume) }}</b>
+          </div>
+          <div>
+            <span>成交额</span><b>{{ compact(quote.amount) }}</b>
+          </div>
+        </div>
+        <section class="panel">
+          <div class="panel-top">
+            <h3>真实 K线与成交量</h3>
+            <div class="periods">
+              <button
+                v-for="p in periods"
+                :key="p"
+                :class="{ active: interval === p }"
+                @click="changeInterval(p)"
+                :disabled="detailLoading"
+              >
+                {{ p.toUpperCase() }}
+              </button>
+            </div>
+          </div>
+          <div v-if="detailLoading" class="loading-box">
+            正在获取 {{ interval.toUpperCase() }} 真实 K线…
+          </div>
+          <KlineChart v-else :candles="candles" :indicators="indicators" />
+        </section>
+        <section v-if="indicators" class="panel">
+          <div class="panel-top">
+            <h3>实时计算技术指标</h3>
+            <span class="score">综合 {{ indicators.score }} / 100</span>
+          </div>
+          <div class="indicator-grid">
+            <div>
+              <span>MA5 / MA20</span
+              ><b
+                >{{ indicators.latest.ma5?.toFixed(2) }} /
+                {{ indicators.latest.ma20?.toFixed(2) }}</b
+              >
+            </div>
+            <div>
+              <span>EMA12 / EMA26</span
+              ><b
+                >{{ indicators.latest.ema12?.toFixed(2) }} /
+                {{ indicators.latest.ema26?.toFixed(2) }}</b
+              >
+            </div>
+            <div>
+              <span>MACD</span><b>{{ indicators.latest.macd?.toFixed(4) }}</b>
+            </div>
+            <div>
+              <span>RSI(14)</span><b>{{ indicators.latest.rsi?.toFixed(2) }}</b>
+            </div>
+            <div>
+              <span>K / D / J</span
+              ><b
+                >{{ indicators.latest.kdj_k?.toFixed(1) }} /
+                {{ indicators.latest.kdj_d?.toFixed(1) }} /
+                {{ indicators.latest.kdj_j?.toFixed(1) }}</b
+              >
+            </div>
+            <div>
+              <span>BOLL 上/中/下</span
+              ><b
+                >{{ indicators.latest.boll_upper?.toFixed(2) }} /
+                {{ indicators.latest.boll_mid?.toFixed(2) }} /
+                {{ indicators.latest.boll_lower?.toFixed(2) }}</b
+              >
+            </div>
+            <div>
+              <span>ATR</span><b>{{ indicators.latest.atr?.toFixed(3) }}</b>
+            </div>
+            <div>
+              <span>OBV</span><b>{{ compact(indicators.latest.obv) }}</b>
+            </div>
+          </div>
+        </section>
+        <section class="two-col">
+          <div class="panel ai-panel">
+            <div class="panel-top">
+              <div>
+                <h3>AI V4 市场研究驾驶舱</h3>
+                <small class="muted">严格时间验证 · 市场联动 · 路径风险 · 数据质量</small>
+              </div>
+              <button class="primary" @click="runAI" :disabled="aiLoading">
+                {{ aiLoading ? "全链路计算中…" : "生成动态方案" }}
+              </button>
+            </div>
+            <div class="decision-inputs">
+              <label>账户资金<input v-model.number="accountEquity" type="number" min="100" /></label>
+              <label>单笔风险 %<input v-model.number="maxRiskPercent" type="number" min="0.1" max="10" step="0.1" /></label>
+              <label>杠杆<input v-model.number="leverage" type="number" min="1" max="100" /></label>
+            </div>
+            <div v-if="!aiResult" class="empty">
+              将比较 Logistic Regression、Random Forest、XGBoost、LightGBM
+              与可用的 CatBoost；使用隔离验证集选择权重，最终测试集不参与选模。
+            </div>
+            <template v-else
+              ><div class="prediction-grid v2">
+                <div
+                  v-for="(p, h) in aiResult.predictions"
+                  :key="h"
+                  class="prediction-card"
+                >
+                  <template v-if="p.prediction"
+                    ><div class="prediction-title">
+                      <span>未来 {{ h }}</span
+                      ><i>{{ p.status }}</i>
+                    </div>
+                    <b
+                      >{{ p.trend }} <small>{{ p.prediction }}</small></b
+                    >
+                    <div class="probability-bars">
+                      <label
+                        >涨 <span>{{ probability(p.probabilities.up) }}</span
+                        ><i
+                          :style="{ width: probability(p.probabilities.up) }"
+                        ></i></label
+                      ><label
+                        >震 <span>{{ probability(p.probabilities.flat) }}</span
+                        ><i
+                          :style="{ width: probability(p.probabilities.flat) }"
+                        ></i></label
+                      ><label
+                        >跌 <span>{{ probability(p.probabilities.down) }}</span
+                        ><i
+                          :style="{ width: probability(p.probabilities.down) }"
+                        ></i
+                      ></label>
+                    </div>
+                    <div class="confidence">
+                      <strong>置信等级 {{ p.confidence }}</strong
+                      ><span>{{ p.confidence_score }} / 100</span
+                      ><span>模型共识 {{ p.consensus_label }}</span>
+                    </div>
+                    <small
+                      >目标
+                      {{
+                        p.future_timestamp?.replace("T", " ").slice(0, 19)
+                      }}
+                      UTC</small
+                    ><em
+                      >Walk Forward {{ p.walk_forward_accuracy }}% ·
+                      {{ p.walk_forward_samples }} 样本</em
+                    >
+                    <div class="advantage">{{ p.advantage_message }}</div>
+                    <details>
+                      <summary>模型细节与权重</summary>
+                      <div
+                        v-for="(m, name) in p.model_details"
+                        :key="name"
+                        class="model-row"
+                      >
+                        <b>{{ name }}</b
+                        ><span>权重 {{ (m.weight * 100).toFixed(1) }}%</span
+                        ><span>{{ m.direction }}</span
+                        ><small
+                          >Accuracy {{ probability(m.metrics.accuracy) }} · F1
+                          {{ m.metrics.f1_macro }}</small
+                        >
+                      </div>
+                    </details>
+                    <details>
+                      <summary>主要影响因子</summary>
+                      <div
+                        v-for="f in p.top_factors"
+                        :key="f.feature"
+                        class="factor-row"
+                      >
+                        <span>{{ f.label }}</span
+                        ><b
+                          :class="
+                            f.direction === 'positive' ? 'positive' : 'negative'
+                          "
+                          >{{ f.direction === "positive" ? "正向" : "负向" }}</b
+                        ><small>重要性 {{ probability(f.importance) }}</small>
+                      </div>
+                    </details></template
+                  ><template v-else
+                    ><b>数据不足</b><small>{{ p.message }}</small></template
+                  >
+                </div>
+              </div>
+              <div class="feature-strip">
+                <div
+                  v-for="(s, name) in aiResult.feature_availability
+                    .feature_status"
+                  :key="name"
+                  :class="{ available: s.available }"
+                >
+                  <span>{{ name }}</span
+                  ><b>{{ availabilityLabel(s) }}</b>
+                </div>
+              </div>
+              <section v-if="aiResult.decision_center" class="decision-center">
+                <div class="decision-hero">
+                  <div><span>最终决策</span><b>{{ aiResult.decision_center.decision.action }}</b><small>{{ aiResult.decision_center.decision.reason }}</small></div>
+                  <div><span>机会评分</span><b>{{ aiResult.decision_center.trade_opportunity.score }} / 100</b><small>{{ aiResult.decision_center.decision.direction }}</small></div>
+                  <div><span>风险等级</span><b>{{ aiResult.decision_center.risk_level.level }}</b><small>{{ probability(aiResult.decision_center.risk_level.score) }}</small></div>
+                </div>
+                <div class="decision-grid">
+                  <article><h4>市场环境</h4><b>{{ aiResult.decision_center.market_regime.primary }}</b><p>{{ aiResult.decision_center.market_regime.risk_mode }} · {{ aiResult.decision_center.market_regime.volatility }}</p></article>
+                  <article><h4>资金方向</h4><b>{{ aiResult.decision_center.capital_flow.direction }}</b><p>{{ aiResult.decision_center.capital_flow.price_flow_relation }} · 持续性 {{ probability(aiResult.decision_center.capital_flow.flow_persistence) }}</p></article>
+                  <article><h4>市场结构</h4><b>{{ aiResult.decision_center.market_structure.structure }}</b><p>{{ aiResult.decision_center.market_structure.high_pattern }} / {{ aiResult.decision_center.market_structure.low_pattern }}</p></article>
+                  <article><h4>期望值</h4><b :class="trendClass(aiResult.decision_center.expected_value.percent)">{{ probability(aiResult.decision_center.expected_value.percent) }}</b><p>TP2 R:R {{ aiResult.decision_center.risk_reward.tp2 }} · 盈亏平衡 {{ aiResult.decision_center.risk_reward.breakeven_rr }}</p></article>
+                  <article><h4>当前宏观</h4><b>{{ aiResult.decision_center.external_context?.macro?.signal || aiResult.decision_center.external_context?.macro?.status || 'NO_DATA' }}</b><p>{{ aiResult.decision_center.external_context?.macro?.source || '未取得可验证来源' }}</p></article>
+                  <article><h4>新闻情绪</h4><b>{{ aiResult.decision_center.external_context?.news?.status || 'NO_DATA' }}</b><p>标题关键词分数 {{ aiResult.decision_center.external_context?.news?.sentiment_score ?? '—' }} · 非 LLM 编造</p></article>
+                  <article><h4>事件调整置信度</h4><b>{{ probability(aiResult.decision_center.confidence_adjustment.adjusted) }}</b><p>原始 {{ probability(aiResult.decision_center.confidence_adjustment.raw) }} · 事件系数 {{ aiResult.decision_center.confidence_adjustment.event_factor }}</p></article>
+                  <article v-if="aiResult.decision_center.research"><h4>数据质量</h4><b>{{ aiResult.decision_center.research.data_quality.score }} / 100</b><p>{{ aiResult.decision_center.research.data_quality.grade }} · {{ aiResult.decision_center.research.data_quality.components.source_count }} 个来源</p></article>
+                  <article v-if="aiResult.decision_center.research"><h4>预期收益 / 波动</h4><b>{{ probability(aiResult.decision_center.research.return_distribution.expected_return) }}</b><p>波动 {{ probability(aiResult.decision_center.research.return_distribution.expected_volatility) }} · {{ aiResult.decision_center.research.return_distribution.status }}</p></article>
+                  <article v-if="aiResult.decision_center.research"><h4>市场异常</h4><b>{{ aiResult.decision_center.research.anomaly_detection.status }}</b><p>{{ aiResult.decision_center.research.anomaly_detection.signals.length }} 个已触发异常</p></article>
+                  <article v-if="portfolioRisk"><h4>组合风险</h4><b>{{ portfolioRisk.status }}</b><p v-if="portfolioRisk.status === 'AVAILABLE'">VaR {{ probability(portfolioRisk.var_95_per_bar) }} · CVaR {{ probability(portfolioRisk.cvar_95_per_bar) }}</p><p v-else>{{ portfolioRisk.reason }}</p></article>
+                </div>
+                <div class="trade-plan"><div><span>参考入场</span><b>{{ aiResult.decision_center.decision.entry_zone.lower }} - {{ aiResult.decision_center.decision.entry_zone.upper }}</b></div><div><span>动态止损</span><b>{{ aiResult.decision_center.risk_plan.stop_loss }}</b></div><div v-for="tp in aiResult.decision_center.take_profits" :key="tp.name"><span>{{ tp.name }}</span><b>{{ tp.price }}</b><small>R:R {{ tp.risk_reward }}</small></div><div><span>建议仓位</span><b>{{ aiResult.decision_center.position_sizing.quantity }}</b><small>名义价值 {{ aiResult.decision_center.position_sizing.notional }}</small></div></div>
+                <details><summary>为什么是这个止损？</summary><pre>{{ JSON.stringify(aiResult.decision_center.risk_plan, null, 2) }}</pre></details>
+                <details><summary>支撑、压力与强度</summary><div class="level-list"><div v-for="s in aiResult.decision_center.support_resistance.supports" :key="s.center"><b>支撑 {{ s.lower }} - {{ s.upper }}</b><span>{{ s.strength }}/100</span></div><div v-for="r in aiResult.decision_center.support_resistance.resistances" :key="r.center"><b>压力 {{ r.lower }} - {{ r.upper }}</b><span>{{ r.strength }}/100</span></div></div></details>
+                <details><summary>资金 × 时间周期</summary><div class="timeframe-matrix"><div v-for="(value,tf) in aiResult.decision_center.multi_timeframe.matrix" :key="tf"><b>{{ tf }}</b><span>{{ value.trend || value.status }}</span><span>{{ value.flow || '—' }}</span><span>{{ value.sentiment || '—' }}</span></div></div></details>
+                <details><summary>乐观 / 基准 / 悲观情景</summary><div class="scenario-list"><div v-for="scenario in aiResult.decision_center.scenarios" :key="scenario.name"><b>{{ scenario.name }}</b><span>{{ probability(scenario.probability) }}</span><small>目标 {{ scenario.target || '区间' }}</small></div></div></details>
+                <details v-if="aiResult.decision_center.research"><summary>跨资产滚动相关</summary><div class="level-list"><div v-for="pair in aiResult.decision_center.research.cross_asset.correlations" :key="pair.pair"><b>{{ pair.pair }}</b><span>{{ pair.correlation }} · {{ pair.samples }} 样本</span></div><p v-if="!aiResult.decision_center.research.cross_asset.correlations.length" class="data-warning">{{ aiResult.decision_center.research.cross_asset.reason }}</p></div></details>
+                <details v-if="aiResult.decision_center.research"><summary>MAE / MFE 路径风险与触达概率</summary><div v-if="aiResult.decision_center.research.path_risk.status === 'AVAILABLE'" class="validation-grid"><div><span>样本</span><b>{{ aiResult.decision_center.research.path_risk.samples }}</b></div><div><span>MAE 中位数</span><b>{{ probability(aiResult.decision_center.research.path_risk.mae.median) }}</b></div><div><span>MFE 中位数</span><b>{{ probability(aiResult.decision_center.research.path_risk.mfe.median) }}</b></div><div><span>止损触发概率</span><b>{{ probability(aiResult.decision_center.research.path_risk.stop_hit_probability) }}</b></div><div v-for="tp in aiResult.decision_center.research.path_risk.take_profit_probabilities" :key="tp.name"><span>{{ tp.name }} 历史触达</span><b>{{ probability(tp.historical_hit_probability) }}</b></div></div><p v-else class="data-warning">路径历史样本不足，未生成概率。</p></details>
+                <details v-if="aiResult.decision_center.research"><summary>结构化新闻与去重</summary><div class="level-list"><div v-for="event in aiResult.decision_center.research.news_events.events" :key="event.event_id"><b>{{ event.event_type }} · {{ event.direction }}</b><span>{{ event.title }} · {{ event.publication_time || '时间未知' }}</span></div><p class="data-warning">重复 {{ aiResult.decision_center.research.news_events.duplicate_count }} 条；历史训练状态 {{ aiResult.decision_center.research.news_events.historical_training_status }}</p></div></details>
+                <details v-if="aiResult.decision_center.research"><summary>预测失效条件</summary><div class="level-list"><div v-for="condition in aiResult.decision_center.research.invalidation_conditions" :key="condition.condition"><b>{{ condition.condition }}</b><span>{{ condition.level ?? condition.current ?? '触发即重新计算' }}</span></div><p>本预测到 {{ aiResult.decision_center.research.prediction_lifecycle.expires_at }} 自动过期。</p></div></details>
+                <details v-if="aiResult.decision_center.research"><summary>因子增量价值审计</summary><div class="level-list"><div v-for="(audit,name) in aiResult.decision_center.research.feature_ablation.experiments" :key="name"><b>{{ name }} · Sharpe {{ audit.sharpe }}</b><span>Accuracy {{ probability(audit.accuracy) }} · IC {{ audit.ic }} · Return {{ probability(audit.return) }}</span></div><div v-for="(reason,name) in aiResult.decision_center.research.feature_ablation.not_testable" :key="name"><b>{{ name }}</b><span>{{ reason }}</span></div></div></details>
+                <details><summary>当前外部数据与来源</summary><div class="level-list"><div v-for="(context,name) in aiResult.decision_center.external_context" :key="name"><b>{{ name }} · {{ context.status }}</b><span>{{ context.source || '未配置/不适用' }}</span></div></div></details>
+                <details><summary>历史预测与风险模型验证</summary><div v-if="predictionStats?.overall?.samples" class="validation-grid"><div><span>已到期样本</span><b>{{ predictionStats.overall.samples }}</b></div><div><span>Accuracy</span><b>{{ probability(predictionStats.overall.accuracy) }}</b></div><div><span>F1 Macro</span><b>{{ probability(predictionStats.overall.f1_macro) }}</b></div><div><span>Brier Score</span><b>{{ predictionStats.overall.brier_score }}</b></div><div><span>Stop Hit</span><b>{{ probability(predictionStats.overall.stop_hit_rate) }}</b></div><div><span>TP Hit</span><b>{{ probability(predictionStats.overall.tp_hit_rate) }}</b></div><div><span>Average R</span><b>{{ predictionStats.overall.average_r ?? '—' }}</b></div><div><span>Profit Factor</span><b>{{ predictionStats.overall.profit_factor ?? '—' }}</b></div></div><p v-else class="data-warning">暂无已到期预测样本。系统已保存本次预测，到达目标时间并取得真实行情后才会统计，绝不预填成绩。</p></details>
+                <el-alert v-if="aiResult.decision_center.regime_change_risk.active" title="市场状态可能发生变化" type="warning" show-icon :closable="false" />
+                <p class="data-warning">事件风险：{{ aiResult.decision_center.event_risk.status }}。未配置可验证事件日历时，系统不会编造宏观事件。</p>
+              </section>
+              <div class="model-info">
+                引擎：{{ aiResult.model.name }} ·
+                {{ aiResult.model.models.join(" + ") }}<br />{{
+                  aiResult.model.split
+                }}<br />数据时间：{{ aiResult.data_time }}<br />{{
+                  aiResult.risk_notice
+                }}
+              </div></template
+            >
+          </div>
+          <div class="panel">
+            <div class="panel-top">
+              <h3>历史回测</h3>
+              <button
+                class="primary"
+                @click="runBacktest"
+                :disabled="backtestLoading"
+              >
+                {{ backtestLoading ? "运行中…" : "开始回测" }}
+              </button>
+            </div>
+            <div class="form-row">
+              <select v-model="strategy">
+                <option value="ma">MA 金叉/死叉</option>
+                <option value="macd">MACD</option>
+                <option value="rsi">RSI</option>
+                <option value="ai">AI 趋势</option>
+                <option value="ai_technical">AI + 技术指标</option></select
+              ><input
+                v-model.number="initialCash"
+                type="number"
+                min="100"
+              /><span>初始资金</span>
+            </div>
+            <div v-if="backtestResult" class="backtest-metrics">
+              <div>
+                <span>最终资金</span><b>{{ backtestResult.final_cash }}</b>
+              </div>
+              <div>
+                <span>收益率</span
+                ><b :class="trendClass(backtestResult.return_percent)"
+                  >{{ backtestResult.return_percent }}%</b
+                >
+              </div>
+              <div>
+                <span>最大回撤</span
+                ><b>{{ backtestResult.max_drawdown_percent }}%</b>
+              </div>
+              <div>
+                <span>胜率</span><b>{{ backtestResult.win_rate_percent }}%</b>
+              </div>
+              <div>
+                <span>夏普比率</span><b>{{ backtestResult.sharpe_ratio }}</b>
+              </div>
+              <div>
+                <span>索提诺比率</span><b>{{ backtestResult.sortino_ratio }}</b>
+              </div>
+              <div>
+                <span>交易次数</span><b>{{ backtestResult.trade_count }}</b>
+              </div>
+              <div>
+                <span>盈利因子</span
+                ><b>{{ backtestResult.profit_factor ?? "—" }}</b>
+              </div>
+              <div>
+                <span>手续费 / 滑点</span
+                ><b
+                  >{{ probability(backtestResult.fee_rate) }} /
+                  {{ probability(backtestResult.slippage_rate) }}</b
+                >
+              </div>
+            </div>
+            <EquityChart
+              v-if="backtestResult"
+              :curve="backtestResult.equity_curve"
+            />
+            <div v-else class="empty">
+              真实历史行情回测，计入手续费和滑点；AI 策略只用样本外信号。
+            </div>
+          </div>
+        </section>
+        <section class="panel trade-panel">
+          <div>
+            <h3>模拟交易</h3>
+            <p>成交价格由当前实时行情 API 决定，手续费自动记录。</p>
+          </div>
+          <input v-model.number="orderAmount" type="number" min="1" /><span
+            >{{ selected?.asset_type === "crypto" ? "USDT" : "CNY" }} 金额</span
+          ><button
+            class="buy"
+            @click="placeOrder('BUY')"
+            :disabled="orderLoading"
+          >
+            模拟买入</button
+          ><button
+            class="sell"
+            @click="placeOrder('SELL')"
+            :disabled="orderLoading"
+          >
+            模拟卖出
+          </button>
+        </section></template
+      >
 
-<template v-else-if="page==='paper'"><div v-if="paperLoading" class="loading-box">正在按实时行情计算账户…</div><div class="account-grid"><div v-for="a in paperAccounts" :key="a.currency" class="account-card"><span>{{a.currency}} 模拟账户</span><b>{{price(a.total_equity,a.currency)}}</b><small>可用 {{price(a.cash,a.currency)}} · 收益 {{a.return_percent}}%</small></div></div><section class="panel"><h3>实时持仓</h3><div v-if="!positions.length" class="empty">暂无持仓，可从任意资产详情页模拟买入。</div><div v-for="p in positions" :key="p.asset_type+p.symbol" class="table-row"><b>{{p.symbol}}</b><span>数量 {{p.quantity.toFixed(6)}}</span><span>成本 {{p.average_cost.toFixed(2)}}</span><span>现价 {{p.current_price??'行情不可用'}}</span><span :class="trendClass(p.return_percent)">浮盈 {{p.unrealized_pnl??'—'}}（{{p.return_percent??'—'}}%）</span><button @click="sellAll(p)">全部卖出</button></div></section><section class="panel"><h3>模拟订单记录</h3><div v-for="o in orders" :key="o.id" class="table-row order"><span>#{{o.id}}</span><b>{{o.symbol}} {{o.side}}</b><span>{{o.quantity.toFixed(6)}} × {{o.price}}</span><span>手续费 {{o.fee.toFixed(4)}}</span><small>{{o.created_at}}</small></div></section></template>
+      <template v-else-if="page === 'paper'"
+        ><div v-if="paperLoading" class="loading-box">
+          正在按实时行情计算账户…
+        </div>
+        <div class="account-grid">
+          <div
+            v-for="a in paperAccounts"
+            :key="a.currency"
+            class="account-card"
+          >
+            <span>{{ a.currency }} 模拟账户</span
+            ><b>{{ price(a.total_equity, a.currency) }}</b
+            ><small
+              >可用 {{ price(a.cash, a.currency) }} · 收益
+              {{ a.return_percent }}%</small
+            >
+          </div>
+        </div>
+        <section class="panel">
+          <h3>实时持仓</h3>
+          <div v-if="!positions.length" class="empty">
+            暂无持仓，可从任意资产详情页模拟买入。
+          </div>
+          <div
+            v-for="p in positions"
+            :key="p.asset_type + p.symbol"
+            class="table-row"
+          >
+            <b>{{ p.symbol }}</b
+            ><span>数量 {{ p.quantity.toFixed(6) }}</span
+            ><span>成本 {{ p.average_cost.toFixed(2) }}</span
+            ><span>现价 {{ p.current_price ?? "行情不可用" }}</span
+            ><span :class="trendClass(p.return_percent)"
+              >浮盈 {{ p.unrealized_pnl ?? "—" }}（{{
+                p.return_percent ?? "—"
+              }}%）</span
+            ><button @click="sellAll(p)">全部卖出</button>
+          </div>
+        </section>
+        <section class="panel">
+          <h3>模拟订单记录</h3>
+          <div v-for="o in orders" :key="o.id" class="table-row order">
+            <span>#{{ o.id }}</span
+            ><b>{{ o.symbol }} {{ o.side }}</b
+            ><span>{{ o.quantity.toFixed(6) }} × {{ o.price }}</span
+            ><span>手续费 {{ o.fee.toFixed(4) }}</span
+            ><small>{{ o.created_at }}</small>
+          </div>
+        </section></template
+      >
 
-<template v-else-if="page==='watchlist'"><section class="panel"><h3>持久化自选</h3><p class="muted">保存在本机 SQLite，关闭软件后仍然存在。</p><div class="grid"><button v-for="w in watchlist" :key="w.symbol" class="card compact" @click="openAsset({symbol:w.symbol,name:w.name||w.symbol,asset_type:w.asset_type})"><div class="asset"><div :class="w.asset_type==='crypto'?'coin':'stock'">{{(w.name||w.symbol)[0]}}</div><div><b>{{w.name||w.symbol}}</b><small>{{w.symbol}} · {{w.asset_type==='crypto'?'数字资产':'A股'}}</small></div></div><div class="card-action">打开完整分析 →</div></button></div></section></template>
-<template v-else-if="page==='settings'"><section class="panel settings-card"><span class="eyebrow">APPLICATION UPDATE</span><h2>AI行情助手 v{{appVersion}}</h2><p class="muted">正式更新通道：GitHub Releases<br>{{updateStatus}}</p><button class="primary" @click="checkUpdates" :disabled="updateChecking">{{updateChecking?'正在检查…':'检查更新'}}</button></section><section class="panel"><h3>用户数据</h3><p class="muted">数据库、设置、自选、模拟交易和回测记录保存在 %APPDATA%\AI行情助手，升级程序不会覆盖这些数据。</p></section></template>
-<footer>所有行情来自公开真实数据源；预测和回测不构成投资建议。<span>AI行情助手 v{{appVersion}}</span></footer></main></div></template>
+      <template v-else-if="page === 'watchlist'"
+        ><section class="panel">
+          <h3>持久化自选</h3>
+          <p class="muted">保存在本机 SQLite，关闭软件后仍然存在。</p>
+          <div class="grid">
+            <button
+              v-for="w in watchlist"
+              :key="w.symbol"
+              class="card compact"
+              @click="
+                openAsset({
+                  symbol: w.symbol,
+                  name: w.name || w.symbol,
+                  asset_type: w.asset_type,
+                })
+              "
+            >
+              <div class="asset">
+                <div :class="w.asset_type === 'crypto' ? 'coin' : 'stock'">
+                  {{ (w.name || w.symbol)[0] }}
+                </div>
+                <div>
+                  <b>{{ w.name || w.symbol }}</b
+                  ><small
+                    >{{ w.symbol }} ·
+                    {{ w.asset_type === "crypto" ? "数字资产" : "A股" }}</small
+                  >
+                </div>
+              </div>
+              <div class="card-action">打开完整分析 →</div>
+            </button>
+          </div>
+        </section></template
+      >
+      <template v-else-if="page === 'settings'"
+        ><section class="panel settings-card">
+          <span class="eyebrow">APPLICATION UPDATE</span>
+          <h2>AI行情助手 v{{ appVersion }}</h2>
+          <p class="muted">
+            正式更新通道：GitHub Releases<br />{{ updateStatus }}
+          </p>
+          <button
+            class="primary"
+            @click="checkUpdates"
+            :disabled="updateChecking"
+          >
+            {{ updateChecking ? "正在检查…" : "检查更新" }}
+          </button>
+        </section>
+        <section class="panel">
+          <h3>用户数据</h3>
+          <p class="muted">
+            数据库、设置、自选、模拟交易和回测记录保存在
+            %APPDATA%\AI行情助手，升级程序不会覆盖这些数据。
+          </p>
+        </section></template
+      >
+      <footer>
+        所有行情来自公开真实数据源；预测和回测不构成投资建议。<span
+          >AI行情助手 v{{ appVersion }}</span
+        >
+      </footer>
+    </main>
+  </div>
+</template>

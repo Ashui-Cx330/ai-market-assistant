@@ -7,6 +7,10 @@ if TEST_DATA.exists():
     shutil.rmtree(TEST_DATA)
 os.environ["TRADING_AI_DATA_DIR"] = str(TEST_DATA)
 
+import backend.database as database
+database.DB_PATH = TEST_DATA / "database" / "trading_ai.db"
+database.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
 from fastapi.testclient import TestClient
 from backend.main import app
 
@@ -38,11 +42,26 @@ def test_complete_real_data_chain():
         assert len(crypto_kline["candles"]) >= 250 and crypto_kline["indicators"]["latest"]["rsi"] is not None
 
         prediction = assert_ok(client.post("/api/ai/predict", json={"symbol": "BTC", "asset_type": "crypto", "interval": "1h"}))
-        assert prediction["model"]["name"] == "RandomForestClassifier" and prediction["model"]["walk_forward"] is True
-        for horizon in ("1h", "4h", "1d"):
+        assert prediction["model"]["name"] == "PerformanceWeightedEnsemble" and prediction["model"]["walk_forward"] is True
+        assert {"LogisticRegression", "RandomForest", "XGBoost", "LightGBM"}.issubset(prediction["model"]["models"])
+        assert prediction["model"]["purged_cv"] and prediction["model"]["embargo"]
+        available_horizons=0
+        for horizon in ("1H", "4H", "1D"):
             p = prediction["predictions"][horizon]
+            if not p.get("prediction"):
+                assert p["status"] == "INSUFFICIENT_DATA"
+                continue
+            available_horizons+=1
             assert abs(p["prob_up"] + p["prob_flat"] + p["prob_down"] - 100) < 0.02
             assert p["walk_forward_samples"] > 0
+            assert p["validation_scheme"]["leakage_check"] is True
+        assert available_horizons >= 1
+        research=prediction["decision_center"]["research"]
+        assert research["path_risk"]["status"] == "AVAILABLE"
+        assert research["return_distribution"]["status"] == "AVAILABLE"
+        assert research["feature_ablation"]["status"] == "AVAILABLE"
+        assert research["cross_asset"]["status"] in {"AVAILABLE","DATA_INSUFFICIENT"}
+        assert 0 <= research["data_quality"]["score"] <= 100
 
         for strategy in ("ma", "macd", "rsi", "ai", "ai_technical"):
             result = assert_ok(client.post("/api/backtest/run", json={"symbol": "BTC", "asset_type": "crypto", "interval": "1h", "strategy": strategy, "initial_cash": 10000, "limit": 300}))
@@ -67,4 +86,3 @@ def test_complete_real_data_chain():
 def teardown_module():
     if TEST_DATA.exists():
         shutil.rmtree(TEST_DATA)
-

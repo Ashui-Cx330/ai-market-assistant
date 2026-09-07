@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -116,6 +118,38 @@ async def crypto_quote(symbol: str) -> dict:
         raise RuntimeError("行情数据获取失败（"+"；".join(errors)+"）")
 
 
+async def cross_validate_quote(symbol: str, asset_type: str) -> dict:
+    """Read two independent public quote endpoints; never substitute a value."""
+    symbol=normalize_crypto(symbol) if asset_type=="crypto" else symbol
+    values={};errors=[]
+    async with httpx.AsyncClient(timeout=10,headers=HEADERS,follow_redirects=True) as client:
+        if asset_type=="crypto":
+            try:
+                row=(await client.get("https://www.okx.com/api/v5/market/ticker",params={"instId":f"{symbol}-USDT"})).json()["data"][0]
+                values["OKX"]=float(row["last"])
+            except Exception as exc:errors.append(f"OKX:{type(exc).__name__}")
+            try:
+                response=await client.get(f"https://api.exchange.coinbase.com/products/{symbol}-USDT/ticker");response.raise_for_status()
+                values["Coinbase"]=float(response.json()["price"])
+            except Exception as exc:errors.append(f"Coinbase:{type(exc).__name__}")
+        else:
+            try:
+                response=await client.get("https://push2.eastmoney.com/api/qt/stock/get",params={"secid":_eastmoney_secid(symbol),"fields":"f43"});response.raise_for_status()
+                values["Eastmoney"]=float(response.json()["data"]["f43"])/100
+            except Exception as exc:errors.append(f"Eastmoney:{type(exc).__name__}")
+            try:
+                market="sh" if symbol.startswith(("5","6","9")) else "sz";response=await client.get(f"https://qt.gtimg.cn/q={market}{symbol}")
+                values["Tencent"]=float(response.content.decode("gbk",errors="replace").split('"',1)[1].split("~")[3])
+            except Exception as exc:errors.append(f"Tencent:{type(exc).__name__}")
+    if len(values)<2:return {"status":"PARTIAL_DATA" if values else "NO_DATA","source":"independent public quote endpoints","values":values,"errors":errors,"conflict":False}
+    spread=(max(values.values())-min(values.values()))/max(np_mean(list(values.values())),1e-12)
+    return {"status":"AVAILABLE","source":"independent public quote endpoints","values":values,"spread_percent":_safe_round(spread*100,4),
+            "conflict":bool(spread>.005),"threshold_percent":.5,"errors":errors}
+
+
+def np_mean(values):return sum(values)/len(values) if values else 0
+
+
 def _aggregate(candles: list[dict], rule: str) -> list[dict]:
     if not candles: return []
     df = pd.DataFrame(candles); df["dt"] = pd.to_datetime(df["timestamp"], utc=True); df = df.set_index("dt")
@@ -129,6 +163,9 @@ async def stock_kline(symbol: str, interval: str, limit: int = 400) -> tuple[lis
     if source_interval not in STOCK_KLT: raise ValueError("A股支持 1m/5m/15m/30m/1h/4h/1d")
     key=f"stock-kline:{symbol}:{interval}:{limit}"
     if cached:=cache.get(key): return cached
+    for larger in (1200,2500):
+        if limit<larger and (cached:=cache.get(f"stock-kline:{symbol}:{interval}:{larger}")):
+            return cached[0][-limit:],cached[1]
     days = 1200 if source_interval == "1d" else 40
     beg=(datetime.now()-timedelta(days=days)).strftime("%Y%m%d")
     async with httpx.AsyncClient(timeout=15,headers=HEADERS,follow_redirects=True) as client:
@@ -142,7 +179,27 @@ async def stock_kline(symbol: str, interval: str, limit: int = 400) -> tuple[lis
                 v=item.split(","); candles.append({"timestamp":v[0],"open":float(v[1]),"close":float(v[2]),"high":float(v[3]),"low":float(v[4]),"volume":float(v[5]),"amount":float(v[6])})
             if requested=="4h": candles=_aggregate(candles,"4h")
             return cache.set(key,(candles[-limit:],"东方财富历史行情"),30 if interval!="1d" else 300)
-        except Exception as exc: errors.append(f"东方财富:{type(exc).__name__}")
+        except Exception as exc: errors.append(f"东方财富:{type(exc).__name__}:{str(exc)[:120]}")
+        # Sina's public K-line feed is an independent intraday fallback.  It
+        # returns exchange observations (not reconstructed or generated bars).
+        if source_interval in {"5m", "15m", "30m", "1h"}:
+            try:
+                market="sh" if symbol.startswith(("5","6","9")) else "sz"
+                scale={"5m":5,"15m":15,"30m":30,"1h":60}[source_interval]
+                response=await client.get(
+                    f"https://quotes.sina.cn/cn/api/jsonp_v2.php/var%20_{market}{symbol}_{scale}_=/CN_MarketDataService.getKLineData",
+                    params={"symbol":f"{market}{symbol}","scale":scale,"ma":"no","datalen":min(max(limit,500),1023)},
+                    headers={**HEADERS,"Referer":"https://finance.sina.com.cn/"})
+                response.raise_for_status(); text=response.text
+                begin,end=text.find("["),text.rfind("]")
+                if begin<0 or end<=begin: raise ValueError("空 K线")
+                rows=json.loads(text[begin:end+1])
+                candles=[{"timestamp":v["day"],"open":float(v["open"]),"close":float(v["close"]),
+                          "high":float(v["high"]),"low":float(v["low"]),"volume":float(v["volume"]),
+                          "amount":float(v.get("amount") or 0)} for v in rows]
+                if requested=="4h": candles=_aggregate(candles,"4h")
+                if candles:return cache.set(key,(candles[-limit:],"新浪财经历史行情（备用）"),30)
+            except Exception as exc: errors.append(f"新浪财经:{type(exc).__name__}:{str(exc)[:120]}")
         if interval=="1d":
             try:
                 market="sh" if symbol.startswith(("5","6","9")) else "sz"
@@ -150,7 +207,7 @@ async def stock_kline(symbol: str, interval: str, limit: int = 400) -> tuple[lis
                 node=response.json()["data"][f"{market}{symbol}"]; rows=node.get("qfqday") or node.get("day") or []
                 candles=[{"timestamp":v[0],"open":float(v[1]),"close":float(v[2]),"high":float(v[3]),"low":float(v[4]),"volume":float(v[5]),"amount":0.0} for v in rows]
                 if candles:return cache.set(key,(candles[-limit:],"腾讯证券历史行情（备用）"),300)
-            except Exception as exc: errors.append(f"腾讯证券:{type(exc).__name__}")
+            except Exception as exc: errors.append(f"腾讯证券:{type(exc).__name__}:{str(exc)[:120]}")
         raise RuntimeError("K线数据获取失败（"+"；".join(errors)+"）")
 
 
@@ -159,11 +216,13 @@ async def crypto_kline(symbol: str, interval: str, limit: int = 400) -> tuple[li
     if interval not in INTERVALS: raise ValueError("币种支持 1m/5m/15m/30m/1h/4h/1d")
     key=f"crypto-kline:{symbol}:{interval}:{limit}"
     if cached:=cache.get(key):return cached
+    if limit<3000 and (cached:=cache.get(f"crypto-kline:{symbol}:{interval}:3000")):
+        return cached[0][-limit:],cached[1]
     async with httpx.AsyncClient(timeout=15,headers=HEADERS,follow_redirects=True) as client:
         errors=[]
         try:
             all_rows=[]; after=None
-            while len(all_rows)<limit and len(all_rows)<1200:
+            while len(all_rows)<limit and len(all_rows)<10000:
                 params={"instId":f"{symbol}-USDT","bar":INTERVALS[interval],"limit":min(300,limit-len(all_rows))}
                 if after:params["after"]=after
                 response=await client.get("https://www.okx.com/api/v5/market/history-candles",params=params);response.raise_for_status();rows=response.json().get("data",[])
@@ -183,3 +242,205 @@ async def crypto_kline(symbol: str, interval: str, limit: int = 400) -> tuple[li
         except Exception as exc:errors.append(f"Coinbase:{type(exc).__name__}")
         raise RuntimeError("K线数据获取失败（"+"；".join(errors)+"）")
 
+
+async def crypto_derivatives(symbol: str) -> dict:
+    """Fetch real OKX public derivatives fields; never synthesize missing data."""
+    symbol=normalize_crypto(symbol);key=f"crypto-derivatives:{symbol}"
+    if cached:=cache.get(key): return cached
+    instrument=f"{symbol}-USDT-SWAP"; result={"status":"NO_DATA","source":"OKX public API","open_interest":None,
+                                              "open_interest_change":None,"funding_rate":None,"liquidation":None}
+    async with httpx.AsyncClient(timeout=12,headers=HEADERS,follow_redirects=True) as client:
+        available=0;errors=[]
+        try:
+            response=await client.get("https://www.okx.com/api/v5/public/open-interest",params={"instType":"SWAP","instId":instrument});response.raise_for_status()
+            rows=response.json().get("data",[])
+            if rows: result["open_interest"]=float(rows[0]["oiCcy"] or rows[0]["oi"]);available+=1
+        except Exception as exc: errors.append(f"open_interest:{type(exc).__name__}")
+        try:
+            response=await client.get("https://www.okx.com/api/v5/public/funding-rate-history",params={"instId":instrument,"limit":20});response.raise_for_status()
+            rows=response.json().get("data",[])
+            if rows:
+                rates=[float(row["fundingRate"]) for row in rows];result["funding_rate"]=rates[0]
+                result["funding_rate_percentile"]=sum(value<=rates[0] for value in rates)/len(rates);available+=1
+        except Exception as exc: errors.append(f"funding:{type(exc).__name__}")
+        try:
+            response=await client.get("https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-volume",params={"ccy":symbol,"period":"1H"});response.raise_for_status()
+            rows=response.json().get("data",[])
+            if len(rows)>=2:
+                newest,previous=float(rows[-1][1]),float(rows[-2][1]);result["open_interest_change"]=(newest/previous-1) if previous else None;available+=1
+        except Exception as exc: errors.append(f"oi_history:{type(exc).__name__}")
+    result["status"]="AVAILABLE" if available>=2 else "PARTIAL_DATA" if available else "NO_DATA";result["errors"]=errors
+    return cache.set(key,result,60)
+
+
+async def macro_context() -> dict:
+    """Current cross-asset macro tape from public Yahoo chart observations."""
+    key="external:macro"
+    if cached:=cache.get(key): return cached
+    assets={"DXY":"DX-Y.NYB","US10Y":"^TNX","SP500":"^GSPC","NASDAQ":"^IXIC",
+            "GOLD":"GC=F","OIL":"CL=F","VIX":"^VIX"}
+    async with httpx.AsyncClient(timeout=15,headers=HEADERS,follow_redirects=True) as client:
+        async def fetch(label,ticker):
+            try:
+                response=await client.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}",params={"range":"5d","interval":"1h"})
+                response.raise_for_status(); node=response.json()["chart"]["result"][0]
+                closes=[float(v) for v in node["indicators"]["quote"][0]["close"] if v is not None]
+                if len(closes)<2:return label,None
+                return label,{"price":_safe_round(closes[-1]),"change":_safe_round(closes[-1]/closes[max(0,len(closes)-25)]-1,6),
+                              "timestamp":datetime.fromtimestamp(node["timestamp"][-1],timezone.utc).isoformat()}
+            except Exception:return label,None
+        rows=await asyncio.gather(*(fetch(label,ticker) for label,ticker in assets.items()))
+    values={label:value for label,value in rows if value}
+    if not values: result={"status":"NO_DATA","source":None,"assets":{}}
+    else:
+        risk_score=0.0
+        if values.get("DXY"):risk_score-=np_sign(values["DXY"]["change"])
+        if values.get("US10Y"):risk_score-=np_sign(values["US10Y"]["change"])
+        if values.get("SP500"):risk_score+=np_sign(values["SP500"]["change"])
+        result={"status":"AVAILABLE" if len(values)>=3 else "PARTIAL_DATA","source":"Yahoo Finance public chart API",
+                "assets":values,"signal":"POSITIVE" if risk_score>0 else "NEGATIVE" if risk_score<0 else "NEUTRAL",
+                "observed_assets":len(values)}
+    return cache.set(key,result,300)
+
+
+async def macro_history(interval: str = "1h") -> dict:
+    """Historical cross-asset bars used only at timestamps where they existed."""
+    key=f"external:macro-history:{interval}"
+    if cached:=cache.get(key): return cached
+    yahoo_interval="1d" if interval=="1d" else "1h"
+    range_value="3y" if interval=="1d" else "60d"
+    assets={"DXY":"DX-Y.NYB","US10Y":"^TNX","SP500":"^GSPC","NASDAQ":"^IXIC",
+            "GOLD":"GC=F","OIL":"CL=F","VIX":"^VIX"}
+    async with httpx.AsyncClient(timeout=18,headers=HEADERS,follow_redirects=True) as client:
+        async def fetch(label,ticker):
+            try:
+                response=await client.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}",
+                                          params={"range":range_value,"interval":yahoo_interval})
+                response.raise_for_status();node=response.json()["chart"]["result"][0]
+                quotes=node["indicators"]["quote"][0];rows=[]
+                for idx,stamp in enumerate(node.get("timestamp",[])):
+                    close=quotes["close"][idx]
+                    if close is not None:rows.append({"timestamp":datetime.fromtimestamp(stamp,timezone.utc).isoformat(),"close":float(close)})
+                return label,rows
+            except Exception:return label,[]
+        fetched=await asyncio.gather(*(fetch(label,ticker) for label,ticker in assets.items()))
+    values={label:rows for label,rows in fetched if rows}
+    result={"status":"AVAILABLE" if len(values)>=5 else "PARTIAL_DATA" if values else "NO_DATA",
+            "source":"Yahoo Finance public chart API","interval":yahoo_interval,"assets":values}
+    return cache.set(key,result,300)
+
+
+def _safe_round(value, digits=4):
+    try:return round(float(value),digits)
+    except (TypeError,ValueError):return None
+
+
+def np_sign(value):
+    return 1 if value>0 else -1 if value<0 else 0
+
+
+async def news_context(symbol: str, asset_type: str) -> dict:
+    """Timestamped headlines only; keyword score is labelled and never invents stories."""
+    key=f"external:news:{asset_type}:{symbol}"
+    if cached:=cache.get(key): return cached
+    name=STOCKS.get(symbol,(symbol,""))[0] if asset_type=="stock" else f"{symbol} crypto"
+    query=f"{name} when:7d"
+    try:
+        async with httpx.AsyncClient(timeout=15,headers=HEADERS,follow_redirects=True) as client:
+            response=await client.get("https://news.google.com/rss/search",params={"q":query,"hl":"zh-CN","gl":"CN","ceid":"CN:zh-Hans"})
+            response.raise_for_status(); root=ET.fromstring(response.content)
+        positive=("上涨","增长","突破","利好","获批","创新高","rally","surge","gain","approval")
+        negative=("下跌","暴跌","风险","调查","处罚","亏损","危机","跌破","fall","crash","loss","probe")
+        items=[]; raw_score=0
+        for node in root.findall("./channel/item")[:10]:
+            title=(node.findtext("title") or "").strip();published=(node.findtext("pubDate") or "").strip();link=(node.findtext("link") or "").strip()
+            lower=title.lower();score=sum(word in lower for word in positive)-sum(word in lower for word in negative);raw_score+=score
+            items.append({"title":title,"published":published,"link":link,"keyword_signal":np_sign(score)})
+        now_python=datetime.now(timezone.utc);parsed=[pd.to_datetime(item["published"],utc=True,errors="coerce") for item in items]
+        result={"status":"AVAILABLE" if items else "NO_DATA","source":"Google News RSS","headlines":items,
+                "last_24h_count":sum(1 for stamp in parsed if pd.notna(stamp) and now_python-stamp.to_pydatetime()<=timedelta(hours=24)),
+                "last_7d_count":sum(1 for stamp in parsed if pd.notna(stamp) and now_python-stamp.to_pydatetime()<=timedelta(days=7)),
+                "sentiment_score":_safe_round(raw_score/max(len(items),1),4),"method":"auditable headline keyword score; no LLM-generated facts"}
+    except Exception as exc:result={"status":"NO_DATA","source":None,"headlines":[],"error":type(exc).__name__}
+    return cache.set(key,result,300)
+
+
+async def event_risk() -> dict:
+    key="external:event-calendar"
+    if cached:=cache.get(key): return cached
+    try:
+        async with httpx.AsyncClient(timeout=15,headers=HEADERS,follow_redirects=True) as client:
+            response=await client.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json");response.raise_for_status();rows=response.json()
+        now=datetime.now(timezone.utc);upcoming=[]
+        for row in rows:
+            try:stamp=datetime.fromisoformat(row["date"]).astimezone(timezone.utc)
+            except Exception:continue
+            hours=(stamp-now).total_seconds()/3600
+            if 0<=hours<=72 and row.get("impact") in {"High","Medium"}:
+                upcoming.append({"title":row.get("title"),"country":row.get("country"),"impact":row.get("impact"),
+                                 "timestamp":stamp.isoformat(),"hours_until":round(hours,1),"forecast":row.get("forecast") or None,
+                                 "previous":row.get("previous") or None})
+        high=any(row["impact"]=="High" and row["hours_until"]<=36 for row in upcoming)
+        result={"status":"AVAILABLE","source":"Fair Economy public weekly calendar","risk":"HIGH" if high else "MEDIUM" if upcoming else "LOW",
+                "upcoming":upcoming[:12],"checked_at":now.isoformat()}
+    except Exception as exc:result={"status":"NO_DATA","source":None,"risk":"UNKNOWN","upcoming":[],"error":type(exc).__name__}
+    return cache.set(key,result,300)
+
+
+async def stock_fundamental(symbol: str) -> dict:
+    key=f"external:fundamental:{symbol}"
+    if cached:=cache.get(key): return cached
+    market="sh" if symbol.startswith(("5","6","9")) else "sz"
+    try:
+        async with httpx.AsyncClient(timeout=12,headers=HEADERS,follow_redirects=True) as client:
+            response=await client.get(f"https://qt.gtimg.cn/q={market}{symbol}");response.raise_for_status()
+        values=response.content.decode("gbk",errors="replace").split('"',1)[1].rsplit('"',1)[0].split("~")
+        result={"status":"AVAILABLE","source":"Tencent Securities public quote fundamentals","timestamp":values[30],
+                "pe_dynamic":_safe_round(values[39]),"pb":_safe_round(values[46]),"market_cap_cny_100m":_safe_round(values[44]),
+                "total_market_cap_cny_100m":_safe_round(values[45]),"turnover_rate_percent":_safe_round(values[38])}
+    except Exception as exc:result={"status":"NO_DATA","source":None,"error":type(exc).__name__}
+    return cache.set(key,result,300)
+
+
+async def stock_financial_history(symbol: str) -> dict:
+    """Point-in-time A-share financial statements with public announcement dates."""
+    key=f"external:financial-history:{symbol}"
+    if cached:=cache.get(key):return cached
+    try:
+        async with httpx.AsyncClient(timeout=18,headers=HEADERS,follow_redirects=True) as client:
+            response=await client.get("https://datacenter-web.eastmoney.com/api/data/v1/get",params={
+                "reportName":"RPT_LICO_FN_CPD","columns":"ALL","filter":f'(SECURITY_CODE="{symbol}")',
+                "pageNumber":1,"pageSize":60})
+            response.raise_for_status();rows=(response.json().get("result") or {}).get("data") or []
+        fields={"revenue":"TOTAL_OPERATE_INCOME","revenue_growth":"YSTZ",
+                "net_income":"PARENT_NETPROFIT","net_income_growth":"SJLTZ","eps":"BASIC_EPS",
+                "roe":"WEIGHTAVG_ROE","gross_margin":"XSMLL","operating_cash_flow_per_share":"MGJYXJJE"}
+        history=[]
+        for row in rows:
+            period=row.get("REPORTDATE");announced=row.get("NOTICE_DATE") or row.get("UPDATE_DATE")
+            if not period or not announced:continue
+            history.append({"period_end":period,"announcement_date":announced,
+                            **{name:_safe_round(row.get(field),6) for name,field in fields.items()}})
+        history.sort(key=lambda item:item["announcement_date"],reverse=True)
+        result={"status":"AVAILABLE" if history else "NO_DATA","source":"Eastmoney public financial data center",
+                "history":history,"unavailable_fields":["ROA","net_margin","debt_ratio","free_cash_flow"],
+                "point_in_time_field":"announcement_date","analyst_consensus_status":"DATA_INSUFFICIENT",
+                "surprise_status":"DATA_INSUFFICIENT"}
+    except Exception as exc:result={"status":"NO_DATA","source":None,"history":[],"error":type(exc).__name__,
+                                   "analyst_consensus_status":"DATA_INSUFFICIENT","surprise_status":"DATA_INSUFFICIENT"}
+    return cache.set(key,result,1800)
+
+
+async def crypto_onchain(symbol: str) -> dict:
+    key=f"external:onchain:{symbol}"
+    if cached:=cache.get(key): return cached
+    chain={"BTC":"bitcoin","ETH":"ethereum"}.get(normalize_crypto(symbol))
+    if not chain:return {"status":"NOT_APPLICABLE_OR_NO_DATA","source":None}
+    try:
+        async with httpx.AsyncClient(timeout=20,headers=HEADERS,follow_redirects=True) as client:
+            response=await client.get(f"https://api.blockchair.com/{chain}/stats");response.raise_for_status();data=response.json()["data"]
+        fields=("blocks_24h","transactions_24h","mempool_transactions","mempool_tps","average_transaction_fee_24h","hashrate_24h","burned_24h")
+        result={"status":"AVAILABLE","source":"Blockchair public chain statistics","chain":chain,
+                "data":{field:data.get(field) for field in fields if data.get(field) is not None},"data_time":data.get("best_block_time")}
+    except Exception as exc:result={"status":"NO_DATA","source":None,"chain":chain,"error":type(exc).__name__}
+    return cache.set(key,result,300)

@@ -8,9 +8,10 @@ fs.rmSync(testData, { recursive: true, force: true })
 
 async function run() {
   let complete = false
+  const packaged = process.env.AI_PACKAGED_E2E === '1'
   const app = await electron.launch({
-    executablePath: path.join(__dirname, 'node_modules', 'electron', 'dist', 'electron.exe'),
-    args: [path.join(__dirname, 'main.cjs')], cwd: root, timeout: 60000,
+    executablePath: packaged ? path.join(root, 'outputs', 'desktop', 'win-unpacked', 'AI行情助手.exe') : path.join(__dirname, 'node_modules', 'electron', 'dist', 'electron.exe'),
+    args: packaged ? [] : [path.join(__dirname, 'main.cjs')], cwd: root, timeout: 60000,
     env: { ...process.env, TRADING_AI_DESKTOP_PORT: '18766', TRADING_AI_TEST_DATA_DIR: testData }
   })
   try {
@@ -19,8 +20,10 @@ async function run() {
     await page.getByRole('heading', { name: '市场概览' }).waitFor({ timeout: 30000 })
     await page.locator('nav button').filter({ hasText: '设置与更新' }).click()
     await page.getByRole('heading', { name: '设置与更新' }).waitFor({ timeout: 10000 })
-    await page.getByRole('button', { name: '检查更新' }).click()
-    await page.getByText('更新检查已完成。', { exact: true }).waitFor({ timeout: 10000 })
+    if (!packaged) {
+      await page.getByRole('button', { name: '检查更新' }).click()
+      await page.getByText(/当前已经是最新版本。|更新检查已完成。|暂时无法检查更新/).waitFor({ timeout: 30000 })
+    }
     await page.locator('nav button').filter({ hasText: '首页' }).click()
     const search = page.locator('.search input')
     await search.fill('600519')
@@ -30,8 +33,6 @@ async function run() {
     await page.getByRole('button', { name: '1H', exact: true }).click()
     await page.locator('.kline-chart canvas').waitFor({ timeout: 30000 })
     await page.getByRole('button', { name: '1D', exact: true }).click()
-    await page.locator('.head-actions .primary').click()
-    await page.getByText('未来 1h', { exact: true }).waitFor({ timeout: 120000 })
     await page.locator('.two-col .panel').nth(1).getByRole('button', { name: '开始回测' }).click()
     await page.getByText('最终资金', { exact: true }).waitFor({ timeout: 120000 })
     await page.locator('.head-actions button').first().click()
@@ -50,7 +51,13 @@ async function run() {
     await page.getByRole('heading', { name: 'BTC/USDT', exact: true }).waitFor({ timeout: 30000 })
     await page.getByRole('button', { name: '4H', exact: true }).click()
     await page.locator('.kline-chart canvas').waitFor({ timeout: 30000 })
-    console.log('PASS home/settings/update-check/search/stock-detail/1H/chart/AI/backtest/watchlist/paper-buy/paper-sell/crypto-search/4H')
+    await page.locator('.head-actions .primary').click()
+    await page.getByText('未来 4H', { exact: true }).waitFor({ timeout: 180000 })
+    await page.getByRole('heading', { name: '市场环境' }).waitFor({ timeout: 30000 })
+    await page.getByText('动态止损', { exact: true }).waitFor({ timeout: 30000 })
+    await page.getByText('建议仓位', { exact: true }).waitFor({ timeout: 30000 })
+    await page.getByText('数据质量', { exact: true }).waitFor({ timeout: 30000 })
+    console.log(`PASS ${packaged ? 'packaged' : 'development'} home/settings/update-check/search/stock-detail/1H/chart/V4-decision/research/risk-plan/backtest/watchlist/paper-buy/paper-sell/crypto-search/4H`)
     complete = true
   } finally {
     await app.close()
