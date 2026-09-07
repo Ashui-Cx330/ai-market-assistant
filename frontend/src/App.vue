@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import {
   DataAnalysis,
   HomeFilled,
@@ -22,6 +22,7 @@ import {
   type IndicatorSet,
   type Quote,
 } from "./api";
+import { realtimeMarketStore, type RealtimeEvent } from "./realtime";
 
 type Page = "home" | "detail" | "paper" | "watchlist" | "settings";
 const page = ref<Page>("home"),
@@ -44,6 +45,7 @@ const selected = ref<Asset | null>(null),
   detailError = ref("");
 const aiLoading = ref(false),
   aiResult = ref<any>(null),
+  livePredictionHistory = ref<any[]>([]),
   backtestLoading = ref(false),
   backtestResult = ref<any>(null),
   strategyLeaderboard = ref<any[]>([]),
@@ -122,6 +124,9 @@ async function loadHome() {
       request<any>("/api/ai/market-context").catch(() => null),
     ]);
     items.value = overview.items || [];
+    if(!items.value.some((item)=>item.asset_type==="crypto"&&item.symbol==="BTC"))
+      items.value.unshift({symbol:"BTC",name:"比特币",asset_type:"crypto",source:"实时订阅中"});
+    items.value.forEach((item)=>realtimeMarketStore.subscribe(item.asset_type,item.symbol,item.asset_type==="crypto"?"1m":"1d"));
     appVersion.value = health.version || appVersion.value;
     marketContext.value = context;
     lastUpdate.value = new Date().toLocaleTimeString("zh-CN");
@@ -166,6 +171,7 @@ async function openAsset(asset: Asset, action?: "ai" | "backtest") {
   backtestResult.value = null;
   interval.value = asset.asset_type === "crypto" ? "1h" : "1d";
   await Promise.all([loadQuote(), loadKline()]);
+  realtimeMarketStore.subscribe(asset.asset_type, asset.symbol, interval.value);
   if (action === "ai") await runAI();
   if (action === "backtest") await nextTick();
 }
@@ -199,8 +205,9 @@ async function changeInterval(value: string) {
   interval.value = value;
   aiResult.value = null;
   await loadKline();
+  if(selected.value) realtimeMarketStore.subscribe(selected.value.asset_type, selected.value.symbol, interval.value);
 }
-async function runAI() {
+async function runAI(options?:{silent?:boolean;reasons?:string[]}) {
   if (!selected.value) return;
   aiLoading.value = true;
   aiResult.value = null;
@@ -219,11 +226,52 @@ async function runAI() {
     portfolioRisk.value = await request<any>("/api/ai/portfolio-risk").catch(
       () => null,
     );
-    ElMessage.success("V5 因果技术策略与交易决策完成");
+    const primary:any=aiResult.value?.predictions?.["1H"] || Object.values(aiResult.value?.predictions||{})[0];
+    livePredictionHistory.value.unshift({
+      prediction_id: aiResult.value?.history?.saved?.prediction_id || aiResult.value?.history?.saved || `LIVE-${Date.now()}`,
+      time: new Date().toISOString(), mode:"LIVE", reasons:options?.reasons||["MANUAL"],
+      action:aiResult.value?.decision_center?.v5_final_decision?.action || aiResult.value?.decision_center?.decision?.action,
+      probabilities:primary?.probabilities,
+    });
+    livePredictionHistory.value=livePredictionHistory.value.slice(0,20);
+    if(!options?.silent) ElMessage.success("V6 实时因果策略与交易决策完成");
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : "AI预测失败");
   } finally {
     aiLoading.value = false;
+  }
+}
+
+function selectedRealtimeKey(){
+  return selected.value ? realtimeMarketStore.key(selected.value.asset_type,selected.value.symbol,interval.value) : "";
+}
+function handleRealtime(event:RealtimeEvent){
+  if(event.type==="ticker"&&event.data?.quote){
+    const incoming=event.data.quote;
+    const index=items.value.findIndex((item)=>item.symbol===incoming.symbol&&item.asset_type===incoming.asset_type);
+    if(index>=0)items.value[index]={...items.value[index],...incoming};
+  }
+  if(!selected.value || event.key!==selectedRealtimeKey())return;
+  const state=event.type==="candle"?event.data?.state:event.data;
+  if((event.type==="ticker"||event.type==="snapshot")&&state?.quote)quote.value=state.quote;
+  if(event.type==="candle"&&state){
+    if(state.quote)quote.value=state.quote;
+    if(state.candles)candles.value=state.candles;
+    if(state.indicators)indicators.value=state.indicators;
+    if(state.strategy&&aiResult.value?.decision_center)aiResult.value.decision_center.technical_strategy=state.strategy;
+  }
+  if(event.type==="analysis"){
+    indicators.value=event.data.indicators;
+    if(aiResult.value?.decision_center)aiResult.value.decision_center.technical_strategy=event.data.strategy;
+  }
+  if(event.type==="prediction"&&event.data?.result?.data){
+    aiResult.value=event.data.result.data;
+    const primary:any=aiResult.value?.predictions?.["1H"] || Object.values(aiResult.value?.predictions||{})[0];
+    livePredictionHistory.value.unshift({prediction_id:aiResult.value?.history?.saved?.prediction_id||`LIVE-${Date.now()}`,
+      time:event.data.generatedAt,mode:"LIVE",reasons:event.data.reasons,
+      action:aiResult.value?.decision_center?.v5_final_decision?.action||aiResult.value?.decision_center?.decision?.action,
+      probabilities:primary?.probabilities});
+    livePredictionHistory.value=livePredictionHistory.value.slice(0,20);
   }
 }
 async function runBacktest() {
@@ -382,7 +430,9 @@ function nav(
   else
     openAsset({ symbol: "BTC", name: "比特币", asset_type: "crypto" }, target);
 }
-onMounted(loadHome);
+const removeRealtimeListener=realtimeMarketStore.onEvent(handleRealtime);
+onMounted(()=>{loadHome();realtimeMarketStore.connect()});
+onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
 </script>
 
 <template>
@@ -674,11 +724,16 @@ onMounted(loadHome);
               {{ quote?.source || "正在连接数据源" }} ·
               {{ quote?.updated_at?.replace("T", " ").slice(0, 19) }}
             </p>
+            <div :class="['realtime-status', realtimeMarketStore.connectionStatus.value.toLowerCase()]">
+              <i></i>{{ realtimeMarketStore.connectionStatus.value }}
+              <span>最后更新 {{ realtimeMarketStore.lastUpdateTime.value || '等待数据' }}</span>
+              <span v-if="realtimeMarketStore.latencyMs.value!=null">延迟 {{ realtimeMarketStore.latencyMs.value }}ms</span>
+            </div>
           </div>
           <div class="head-actions">
             <button @click="toggleWatch">
               {{ inWatchlist ? "★ 已收藏" : "☆ 加入自选" }}</button
-            ><button class="primary" @click="runAI" :disabled="aiLoading">
+            ><button class="primary" @click="runAI()" :disabled="aiLoading">
               {{ aiLoading ? "训练模型中…" : "AI预测" }}
             </button>
           </div>
@@ -776,6 +831,15 @@ onMounted(loadHome);
             </div>
           </div>
         </section>
+        <section v-if="livePredictionHistory.length" class="panel">
+          <div class="panel-top"><h3>AI 预测变化</h3><small class="muted">LIVE 与历史回测数据严格分离</small></div>
+          <div class="live-history">
+            <article v-for="item in livePredictionHistory" :key="item.prediction_id">
+              <b>{{ item.action || 'HOLD' }}</b><span>{{ item.time.replace('T',' ').slice(0,19) }}</span>
+              <small>{{ item.mode }} · {{ item.reasons.join(' / ') }}</small>
+            </article>
+          </div>
+        </section>
         <section class="two-col">
           <div class="panel ai-panel">
             <div class="panel-top">
@@ -783,7 +847,7 @@ onMounted(loadHome);
                 <h3>AI V5 因果策略研究驾驶舱</h3>
                 <small class="muted">30类技术策略 · ICT/SMC · Fib/FVG/BOS · 严格时间验证</small>
               </div>
-              <button class="primary" @click="runAI" :disabled="aiLoading">
+              <button class="primary" @click="runAI()" :disabled="aiLoading">
                 {{ aiLoading ? "全链路计算中…" : "生成动态方案" }}
               </button>
             </div>

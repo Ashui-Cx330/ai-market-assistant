@@ -1,6 +1,15 @@
 # AI行情助手自动更新与发布
 
-当前代码版本：**v1.4.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+当前代码版本：**v1.5.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+
+## v1.5.0 / V6
+
+- 新增后端常驻 RealtimeDataManager、事件总线和统一 RealtimeMarketStore。
+- Crypto 使用 OKX 公开 WebSocket 持续接收 Ticker、当前 K 线、逐笔成交与五档盘口；A 股按公开源限制每 15 秒强制重新请求。
+- 当前 K 线实时更新 OHLCV，换周期自动追加；同步重算技术指标、30 类策略、BOS/CHoCH/FVG/Fibonacci 与动态风险。
+- 新增预测条件触发和 5 分钟防抖，预测以新的数据库记录保留，不覆盖历史预测。
+- 新增断线指数退避、重复消息过滤、数据假死检测、服务器时间校准、连接状态/延迟/最后更新时间显示。
+- 首页、详情和策略使用同一全局 Store，页面切换不停止后端同步。
 
 ## v1.4.0 / V5
 

@@ -60,9 +60,9 @@ async def crypto_search(query: str) -> list[dict]:
     return cache.set(key, results[:20], 3600)
 
 
-async def stock_quote(symbol: str) -> dict:
+async def stock_quote(symbol: str, force_refresh: bool = False) -> dict:
     key = f"stock-quote:{symbol}"
-    if cached := cache.get(key): return cached
+    if not force_refresh and (cached := cache.get(key)): return cached
     async with httpx.AsyncClient(timeout=8, headers=HEADERS, follow_redirects=True) as client:
         try:
             response = await client.get("https://push2.eastmoney.com/api/qt/stock/get",
@@ -89,9 +89,9 @@ async def stock_quote(symbol: str) -> dict:
             return cache.set(key, result, 8)
 
 
-async def crypto_quote(symbol: str) -> dict:
+async def crypto_quote(symbol: str, force_refresh: bool = False) -> dict:
     symbol = normalize_crypto(symbol); key = f"crypto-quote:{symbol}"
-    if cached := cache.get(key): return cached
+    if not force_refresh and (cached := cache.get(key)): return cached
     async with httpx.AsyncClient(timeout=8, headers=HEADERS, follow_redirects=True) as client:
         errors = []
         try:
@@ -158,14 +158,15 @@ def _aggregate(candles: list[dict], rule: str) -> list[dict]:
             for idx,row in out.iterrows()]
 
 
-async def stock_kline(symbol: str, interval: str, limit: int = 400) -> tuple[list[dict], str]:
+async def stock_kline(symbol: str, interval: str, limit: int = 400, force_refresh: bool = False) -> tuple[list[dict], str]:
     requested = interval; source_interval = "1h" if interval == "4h" else interval
     if source_interval not in STOCK_KLT: raise ValueError("A股支持 1m/5m/15m/30m/1h/4h/1d")
     key=f"stock-kline:{symbol}:{interval}:{limit}"
-    if cached:=cache.get(key): return cached
-    for larger in (1200,2500):
-        if limit<larger and (cached:=cache.get(f"stock-kline:{symbol}:{interval}:{larger}")):
-            return cached[0][-limit:],cached[1]
+    if not force_refresh:
+        if cached:=cache.get(key): return cached
+        for larger in (1200,2500):
+            if limit<larger and (cached:=cache.get(f"stock-kline:{symbol}:{interval}:{larger}")):
+                return cached[0][-limit:],cached[1]
     days = 1200 if source_interval == "1d" else 40
     beg=(datetime.now()-timedelta(days=days)).strftime("%Y%m%d")
     async with httpx.AsyncClient(timeout=15,headers=HEADERS,follow_redirects=True) as client:
@@ -211,13 +212,14 @@ async def stock_kline(symbol: str, interval: str, limit: int = 400) -> tuple[lis
         raise RuntimeError("K线数据获取失败（"+"；".join(errors)+"）")
 
 
-async def crypto_kline(symbol: str, interval: str, limit: int = 400) -> tuple[list[dict],str]:
+async def crypto_kline(symbol: str, interval: str, limit: int = 400, force_refresh: bool = False) -> tuple[list[dict],str]:
     symbol=normalize_crypto(symbol)
     if interval not in INTERVALS: raise ValueError("币种支持 1m/5m/15m/30m/1h/4h/1d")
     key=f"crypto-kline:{symbol}:{interval}:{limit}"
-    if cached:=cache.get(key):return cached
-    if limit<3000 and (cached:=cache.get(f"crypto-kline:{symbol}:{interval}:3000")):
-        return cached[0][-limit:],cached[1]
+    if not force_refresh:
+        if cached:=cache.get(key):return cached
+        if limit<3000 and (cached:=cache.get(f"crypto-kline:{symbol}:{interval}:3000")):
+            return cached[0][-limit:],cached[1]
     async with httpx.AsyncClient(timeout=15,headers=HEADERS,follow_redirects=True) as client:
         errors=[]
         try:
@@ -339,10 +341,10 @@ def np_sign(value):
     return 1 if value>0 else -1 if value<0 else 0
 
 
-async def news_context(symbol: str, asset_type: str) -> dict:
+async def news_context(symbol: str, asset_type: str, force_refresh: bool = False) -> dict:
     """Timestamped headlines only; keyword score is labelled and never invents stories."""
     key=f"external:news:{asset_type}:{symbol}"
-    if cached:=cache.get(key): return cached
+    if not force_refresh and (cached:=cache.get(key)): return cached
     name=STOCKS.get(symbol,(symbol,""))[0] if asset_type=="stock" else f"{symbol} crypto"
     query=f"{name} when:7d"
     try:
