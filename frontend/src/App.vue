@@ -138,6 +138,7 @@ async function loadHome() {
     marketContext.value = context;
     lastUpdate.value = new Date().toLocaleTimeString("zh-CN");
     await loadWatchlist();
+    void loadNews();
   } catch (e) {
     error.value = e instanceof Error ? e.message : "行情数据获取失败";
   } finally {
@@ -673,6 +674,12 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
             ><small>事件日历 {{ marketContext.event_risk.status }}</small>
           </div>
         </section>
+        <section v-if="newsIntelligence" class="panel home-intelligence">
+          <div><span class="eyebrow">今日市场 AI 总结</span><h2>{{ newsIntelligence.decision.view }}</h2><p>新闻情绪 {{ newsIntelligence.radar.market_sentiment }} · 利好 {{ newsIntelligence.radar.positive }} · 利空 {{ newsIntelligence.radar.negative }} · 重大 {{ newsIntelligence.radar.major }}</p></div>
+          <div><b>核心驱动</b><p v-for="item in newsIntelligence.top_news.slice(0,3)" :key="item.id">{{ item.event.event_type }}：{{ item.one_sentence_summary }}</p></div>
+          <div><b>重点板块 / 风险</b><p>{{ Object.entries(newsIntelligence.sector_impact).sort((a:any,b:any)=>Math.abs(b[1].score)-Math.abs(a[1].score)).slice(0,4).map((x:any)=>`${x[0]} ${x[1].score>0?'+':''}${x[1].score}`).join(' · ') || '暂无明确板块信号' }}</p></div>
+          <button @click="nav('news')">打开新闻情报中心 →</button>
+        </section>
         <section>
           <div class="title-row">
             <div>
@@ -766,6 +773,11 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
             <div class="panel"><h3>利好板块</h3><div class="tag-list"><span v-for="(value,key) in newsIntelligence.sector_impact" :key="key" v-show="value.score > 0">{{ key }} +{{ value.score }}</span></div></div>
             <div class="panel"><h3>风险板块</h3><div class="tag-list risk-tags"><span v-for="(value,key) in newsIntelligence.sector_impact" :key="key" v-show="value.score < 0">{{ key }} {{ value.score }}</span></div></div>
           </section>
+          <section class="two-col">
+            <div class="panel"><h3>AI 关注名单</h3><div class="level-list"><div v-for="item in newsIntelligence.watch_list" :key="item.id"><b>{{ item.event.subject }} · {{ item.event.direction }} · 评分 {{ item.impact.score }}</b><span>{{ item.one_sentence_summary }}</span></div><p v-if="!newsIntelligence.watch_list.length" class="data-warning">暂无达到关注阈值的真实新闻。</p></div></div>
+            <div class="panel"><h3>AI 风险名单</h3><div class="level-list"><div v-for="item in newsIntelligence.risk_list" :key="item.id"><b class="negative">{{ item.event.subject }} · {{ item.event.direction }} · 评分 {{ item.impact.score }}</b><span>{{ item.one_sentence_summary }}</span></div><p v-if="!newsIntelligence.risk_list.length" class="data-warning">暂无达到风险阈值的真实新闻。</p></div></div>
+          </section>
+          <section class="panel"><h3>历史相似事件</h3><div class="level-list"><template v-for="group in newsIntelligence.historical_similar_events" :key="group.current_news_id"><div v-for="match in group.matches" :key="match.news_id"><b>相似度证据 {{ match.similarity_evidence }} · {{ match.outcome_status }}</b><span>{{ match.event_time?.replace('T',' ').slice(0,19) }} · {{ match.title }}</span></div></template><p v-if="!newsIntelligence.historical_similar_events.length" class="data-warning">当前真实样本中尚无可匹配的更早同类事件。</p></div></section>
           <section class="panel"><div class="panel-top"><div><h3>今日最重要的 10 条新闻</h3><p>按事件影响分排序，不按发布时间冒充重要性</p></div><small>{{ newsIntelligence.method }}</small></div>
             <div class="news-list"><article v-for="item in newsIntelligence.top_news" :key="item.id">
               <div class="news-score" :class="item.sentiment.score >= 10 ? 'positive' : item.sentiment.score <= -10 ? 'negative' : ''">{{ item.sentiment.score > 0 ? '+' : '' }}{{ item.sentiment.score }}</div>

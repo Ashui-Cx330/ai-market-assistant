@@ -842,6 +842,8 @@ footer {
 .news-score { display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#8ba0b4;background:#142536;border-radius:8px;min-height:46px; }
 .news-score.positive { color:#22c997;background:#13372f; }.news-score.negative { color:#f15b72;background:#39202a; }
 .compact-news article { padding:9px; }.compact-news .news-score { min-height:38px;font-size:14px; }
+.home-intelligence { display:grid;grid-template-columns:1.2fr 1.6fr 1fr auto;gap:18px;align-items:center; }
+.home-intelligence p { color:#7890a8;font-size:10px;line-height:1.55;margin:5px 0; }
 @media (max-width: 1100px) {
   .grid {
     grid-template-columns: repeat(2, 1fr);
@@ -857,6 +859,7 @@ footer {
   }
   .strategy-grid { grid-template-columns: repeat(2, 1fr); }
   .intelligence-hero { grid-template-columns:1fr; }.news-radar { grid-template-columns:repeat(2,1fr); }
+  .home-intelligence { grid-template-columns:1fr 1fr; }
   .structure-summary { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 720px) {

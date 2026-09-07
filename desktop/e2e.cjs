@@ -25,9 +25,13 @@ async function run() {
       await page.getByText(/当前已经是最新版本。|更新检查已完成。|暂时无法检查更新/).waitFor({ timeout: 30000 })
     }
     await page.locator('nav button').filter({ hasText: '首页' }).click()
+    await page.getByText('今日市场 AI 总结', { exact: true }).waitFor({ timeout: 60000 })
     await page.locator('nav button').filter({ hasText: '新闻情报' }).click()
     await page.getByRole('heading', { name: 'AI Market Intelligence' }).waitFor({ timeout: 30000 })
     await page.getByRole('heading', { name: '今日最重要的 10 条新闻' }).waitFor({ timeout: 60000 })
+    await page.getByRole('heading', { name: 'AI 关注名单' }).waitFor({ timeout: 10000 })
+    await page.getByRole('heading', { name: 'AI 风险名单' }).waitFor({ timeout: 10000 })
+    await page.getByRole('heading', { name: '历史相似事件' }).waitFor({ timeout: 10000 })
     const newsCards = await page.locator('.news-list article').count()
     if (newsCards < 1) throw new Error('Expected at least one observed public news item')
     await page.locator('nav button').filter({ hasText: '首页' }).click()
