@@ -1,7 +1,7 @@
 {
   "name": "ai-market-assistant-desktop",
   "productName": "AI行情助手",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "private": true,
   "author": "AI行情助手 Project",
   "description": "本地 AI 股票与加密货币行情研究平台",

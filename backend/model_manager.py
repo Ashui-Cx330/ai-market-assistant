@@ -3,12 +3,17 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import threading
+import uuid
 from pathlib import Path
 
 import joblib
 
 
 class ModelManager:
+    _locks: dict[str, threading.RLock] = {}
+    _locks_guard = threading.Lock()
+
     def __init__(self, root: str | Path | None = None) -> None:
         data_root = Path(root or os.environ.get("TRADING_AI_DATA_DIR") or Path.home() / ".ai-market-assistant")
         self.root = data_root / "models"
@@ -19,6 +24,26 @@ class ModelManager:
 
     def path(self, symbol: str, interval: str, horizon: str) -> Path:
         return self.root / self._safe(symbol) / self._safe(interval) / self._safe(horizon) / "ensemble.joblib"
+
+    @classmethod
+    def _target_lock(cls, target: Path) -> threading.RLock:
+        key = str(target.resolve()).lower()
+        with cls._locks_guard:
+            return cls._locks.setdefault(key, threading.RLock())
+
+    @staticmethod
+    def _replace_cross_volume_safe(source: Path, target: Path) -> None:
+        try:
+            os.replace(source, target)
+        except OSError as exc:
+            # Some Windows roaming-profile/reparse configurations report
+            # ERROR_NOT_SAME_DEVICE even for visually identical AppData paths.
+            # Copying remains valid across volumes; the existing .previous
+            # backup keeps this fallback recoverable.
+            if getattr(exc, "winerror", None) != 17 and exc.errno != 18:
+                raise
+            shutil.copy2(source, target)
+            source.unlink(missing_ok=True)
 
     def load(self, symbol: str, interval: str, horizon: str, fingerprint: str):
         target = self.path(symbol, interval, horizon)
@@ -49,18 +74,23 @@ class ModelManager:
 
     def save(self, symbol: str, interval: str, horizon: str, artifact: dict) -> Path:
         target = self.path(symbol, interval, horizon)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_suffix(".tmp")
-        joblib.dump(artifact, temporary)
-        if target.exists():
-            shutil.copy2(target, target.with_suffix(".previous.joblib"))
-        os.replace(temporary, target)
+        with self._target_lock(target):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                joblib.dump(artifact, temporary)
+                if target.exists():
+                    shutil.copy2(target, target.with_suffix(".previous.joblib"))
+                self._replace_cross_volume_safe(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
         return target
 
     def rollback(self, symbol: str, interval: str, horizon: str) -> bool:
         target = self.path(symbol, interval, horizon)
         previous = target.with_suffix(".previous.joblib")
-        if not previous.exists():
-            return False
-        os.replace(previous, target)
-        return True
+        with self._target_lock(target):
+            if not previous.exists():
+                return False
+            self._replace_cross_volume_safe(previous, target)
+            return True

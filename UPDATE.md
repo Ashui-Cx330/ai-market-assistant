@@ -1,6 +1,12 @@
 # AI行情助手自动更新与发布
 
-当前代码版本：**v1.5.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+当前代码版本：**v1.5.1**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+
+## v1.5.1 / 模型保存热修复
+
+- 修复 Windows Roaming Profile / reparse path 环境下保存模型出现 `[WinError 17]` 的问题。
+- 模型保存增加同目标线程锁和唯一临时文件，避免自动实时预测与手动预测并发写入冲突。
+- 跨卷替换自动降级为可恢复复制；写入前继续保留 `.previous.joblib` 备份。
 
 ## v1.5.0 / V6
 
