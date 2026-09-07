@@ -1,6 +1,14 @@
 # AI行情助手自动更新与发布
 
-当前代码版本：**v1.6.1**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+当前代码版本：**v1.7.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+
+## v1.7.0 / 真实新闻情报与事件回测
+
+- 新闻中心改为东方财富公告、CoinDesk、Cointelegraph、CNBC、BBC Business、Yahoo Finance 六个独立真实源。
+- 增加 Provider 健康状态、SQLite 缓存降级、模糊转载去重、搜索筛选与 20 条分页。
+- 修复宏观新闻被强行关联到查询股票的问题，只保存公告元数据或标题/摘要明确提及的实体关系。
+- 增加结构化方向、Impact Score、判断原因、直接/间接/反向影响以及 K 线新闻点击详情。
+- 重构 Point-in-Time 新闻事件回测，支持方向、最低影响、最低置信度、T+1/3/5/10/20，并持久化真实价格对齐结果。
 
 ## v1.6.1 / V7 UI 完整性补丁
 

@@ -19,10 +19,11 @@ from pydantic import BaseModel, Field
 from .ai_engine import feature_frame, predict
 from .backtest import run_backtest
 from .database import (DB_PATH, add_watchlist, connection, execute_paper_order, init_db, list_backtests, list_watchlist,
-                       load_news_intelligence,
+                       get_news_intelligence, load_news_intelligence, load_provider_health, query_news_intelligence,
                        paper_snapshot, prediction_history, prediction_statistics, remove_watchlist,
                        resolve_prediction_history, save_backtest, save_external_feature_observations,
-                       save_feature_observations, save_news_intelligence, save_prediction_history)
+                       save_feature_observations, save_historical_event_outcomes, save_news_intelligence,
+                       save_prediction_history, save_provider_health)
 from .indicators import indicator_payload
 from .market import (crypto_derivatives, crypto_kline, crypto_onchain, crypto_quote, crypto_search, event_risk,
                      cross_validate_quote, macro_context, macro_history, news_context, normalize_crypto, stock_fundamental, stock_kline, stock_quote,
@@ -35,7 +36,7 @@ from .strategy_engine import (SIGNAL_KEYS, StrategyEngine, strategy_backtest,
                               strategy_incremental_experiment, walk_forward_strategy,
                               optimize_strategy_parameters, ml_ict_incremental_experiment)
 from .realtime import realtime_manager, utc_now
-from .news_intelligence import build_intelligence, collect_news, event_backtest
+from .news_intelligence import build_intelligence, collect_historical_news, collect_news, event_backtest
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))["version"]
@@ -134,6 +135,11 @@ class NewsBacktestRequest(BaseModel):
     asset_type: str
     interval: str = "1d"
     event_type: str | None = None
+    direction: str = "all"
+    min_impact: float = Field(default=0, ge=0, le=100)
+    min_confidence: float = Field(default=0, ge=0, le=100)
+    horizon: int = Field(default=5)
+    refresh_historical: bool = True
 
 
 @app.get("/api/health")
@@ -158,19 +164,22 @@ async def realtime_snapshot() -> dict:
 
 @app.get("/api/news/providers")
 def news_providers() -> dict:
-    return ok({"providers":["MarketNewsProvider","CompanyNewsProvider","MacroNewsProvider",
-                            "AnnouncementProvider","RSSProvider"],
-               "active_source":"Google News RSS",
-               "nlp_method":"auditable financial event lexicon v1",
+    return ok({"providers":["EastmoneyAnnouncementProvider","CoinDeskProvider","CointelegraphProvider",
+                            "CNBCMarketsProvider","BBCBusinessProvider","YahooFinanceProvider"],
+               "health":load_provider_health(), "active_source":"multiple independent public providers",
+               "nlp_method":"financial-event-rules-v2 deterministic rules",
                "finbert_status":"NOT_INSTALLED",
-               "notice":"Provider 接口可替换；当前情感与事件分析是可审计规则，不冒充 FinBERT/LLM。"})
+               "notice":"Provider 可独立降级；当前分析是可审计规则引擎，不冒充 FinBERT/LLM。"})
 
 
 @app.get("/api/news/intelligence")
 async def news_intelligence(symbol: str | None = None, asset_type: str = "stock", name: str | None = None,
-                            force_refresh: bool = False) -> dict:
+                            force_refresh: bool = False, market: str | None = None,
+                            category: str | None = None, direction: str | None = None,
+                            keyword: str | None = None, hours: int | None = Query(default=None, ge=1, le=24*365),
+                            page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100)) -> dict:
     normalized = normalize_crypto(symbol) if symbol and asset_type == "crypto" else symbol
-    rows, errors = await collect_news(normalized, name)
+    rows, statuses = await collect_news(normalized, name, market, keyword, 50)
     technical_score = volume_ratio = None
     if normalized:
         states = await realtime_manager.store.asset_states(asset_type, normalized)
@@ -178,22 +187,60 @@ async def news_intelligence(symbol: str | None = None, asset_type: str = "stock"
         if usable and usable.indicators:
             technical_score = usable.indicators.get("score")
             volume_ratio = usable.indicators.get("latest", {}).get("volume_ratio")
-    result = build_intelligence(rows, normalized, name, technical_score, volume_ratio,
+    live = build_intelligence(rows, normalized, name, technical_score, volume_ratio,
+                              len(load_news_intelligence(normalized)))
+    live["persisted"] = await asyncio.to_thread(save_news_intelligence, live["all_news"], normalized)
+    await asyncio.to_thread(save_provider_health, statuses)
+    feed = await asyncio.to_thread(query_news_intelligence, normalized, market, category, direction,
+                                   keyword, hours, page, page_size)
+    # Database is the explicit fallback when one/all live providers fail.
+    final_rows = feed["items"]
+    result = build_intelligence(final_rows, normalized, name, technical_score, volume_ratio,
                                 len(load_news_intelligence(normalized)))
-    result["provider_errors"] = errors
-    result["persisted"] = await asyncio.to_thread(save_news_intelligence, result["all_news"], normalized)
-    return ok(result, "真实新闻采集与可审计事件分析完成", source="Google News RSS")
+    result.update(feed); result["all_news"] = final_rows
+    result["top_news"] = final_rows[:10]
+    result["provider_statuses"] = statuses
+    result["provider_errors"] = [x for x in statuses if x["status"] != "HEALTHY"]
+    result["cache_fallback"] = not bool(rows) and bool(final_rows)
+    result["persisted"] = live["persisted"]
+    return ok(result, "真实新闻与缓存降级链路完成", source="independent public providers")
+
+
+@app.get("/api/news/feed")
+def news_feed(symbol: str | None = None, market: str | None = None, category: str | None = None,
+              direction: str | None = None, keyword: str | None = None,
+              hours: int | None = Query(default=None, ge=1, le=24*365), page: int = Query(default=1, ge=1),
+              page_size: int = Query(default=20, ge=1, le=100)) -> dict:
+    return ok(query_news_intelligence(symbol,market,category,direction,keyword,hours,page,page_size),
+              "新闻筛选与分页完成",source="local normalized news database")
 
 
 @app.post("/api/news/backtest")
 async def news_backtest(body: NewsBacktestRequest) -> dict:
     symbol = normalize_crypto(body.symbol) if body.asset_type == "crypto" else body.symbol
+    historical_status=[]
+    if body.refresh_historical:
+        rows,historical_status=await collect_historical_news(symbol,limit=100,pages=3)
+        if rows:
+            analyzed=build_intelligence(rows,symbol)["all_news"]
+            await asyncio.to_thread(save_news_intelligence,analyzed,symbol)
     events = load_news_intelligence(symbol)
-    data, source = await _kline(body.asset_type, symbol, body.interval, 1200)
-    result = await asyncio.to_thread(event_backtest, events, data["candles"], body.event_type)
-    result.update({"symbol":symbol,"asset_type":body.asset_type,"interval":body.interval,
-                   "data_source":source,"news_source":"persisted public headlines"})
+    data, source = await _kline(body.asset_type, symbol, "1d", 1200)
+    confidence=body.min_confidence/100 if body.min_confidence>1 else body.min_confidence
+    result = await asyncio.to_thread(event_backtest, events, data["candles"], body.event_type,
+                                     body.direction, body.min_impact, confidence, body.horizon)
+    result["persisted_outcomes"]=await asyncio.to_thread(save_historical_event_outcomes,symbol,result["outcomes"])
+    result.update({"symbol":symbol,"asset_type":body.asset_type,"interval":"1d","requested_interval":body.interval,
+                   "data_source":source,"news_source":"persisted public headlines and exchange announcements",
+                   "historical_provider_statuses":historical_status})
     return ok(result, "Point-in-Time 新闻事件回测完成", source=source)
+
+
+@app.get("/api/news/item/{news_id}")
+def news_item(news_id: str) -> dict:
+    item=get_news_intelligence(news_id)
+    if not item: raise HTTPException(404,"新闻不存在")
+    return ok(item,"新闻详情")
 
 
 @app.websocket("/api/realtime/ws")
