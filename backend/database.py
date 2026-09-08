@@ -2,6 +2,7 @@ import sqlite3
 import os
 import json
 import math
+import re
 import numpy as np
 import pandas as pd
 import uuid
@@ -52,6 +53,11 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, name TEXT, asset_type TEXT NOT NULL,
                 side TEXT NOT NULL, price REAL NOT NULL, quantity REAL NOT NULL, fee REAL NOT NULL,
                 amount REAL NOT NULL, currency TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS paper_daily_equity (
+                trading_date TEXT NOT NULL, currency TEXT NOT NULL, opening_equity REAL NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(trading_date, currency)
             );
             CREATE TABLE IF NOT EXISTS backtest_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, asset_type TEXT NOT NULL,
@@ -124,11 +130,19 @@ def init_db() -> None:
                     "strategy_version":"TEXT","tp2":"REAL","probability_calibration":"TEXT"}
         for name,sql_type in migrations.items():
             if name not in prediction_columns:conn.execute(f"ALTER TABLE prediction_history ADD COLUMN {name} {sql_type}")
+        account_columns={row[1] for row in conn.execute("PRAGMA table_info(paper_accounts)")}
+        if "frozen_cash" not in account_columns:conn.execute("ALTER TABLE paper_accounts ADD COLUMN frozen_cash REAL NOT NULL DEFAULT 0")
+        position_columns={row[1] for row in conn.execute("PRAGMA table_info(paper_positions)")}
+        if "frozen_quantity" not in position_columns:conn.execute("ALTER TABLE paper_positions ADD COLUMN frozen_quantity REAL NOT NULL DEFAULT 0")
+        order_columns={row[1] for row in conn.execute("PRAGMA table_info(paper_orders)")}
+        for name,sql_type in {"user_id":"TEXT DEFAULT 'local'","order_type":"TEXT DEFAULT 'MARKET'","limit_price":"REAL","status":"TEXT DEFAULT 'filled'","filled_at":"TEXT","cancelled_at":"TEXT","reject_reason":"TEXT"}.items():
+            if name not in order_columns:conn.execute(f"ALTER TABLE paper_orders ADD COLUMN {name} {sql_type}")
+        conn.execute("UPDATE paper_orders SET order_type=COALESCE(order_type,'MARKET'),status=COALESCE(status,'filled'),filled_at=COALESCE(filled_at,created_at)")
         historical_columns={row[1] for row in conn.execute("PRAGMA table_info(historical_events)")}
         for name,sql_type in {"t10_return":"REAL","payload_json":"TEXT"}.items():
             if name not in historical_columns:conn.execute(f"ALTER TABLE historical_events ADD COLUMN {name} {sql_type}")
         conn.executemany("INSERT OR IGNORE INTO paper_accounts(currency,cash,initial_cash) VALUES(?,?,?)",
-                         [("USDT",100000.0,100000.0),("CNY",100000.0,100000.0)])
+                         [("USDT",100000.0,100000.0),("CNY",100000.0,100000.0),("USD",100000.0,100000.0)])
         count = conn.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0]
         if count == 0:
             conn.executemany(
@@ -273,8 +287,23 @@ def paper_snapshot() -> dict:
                 "orders":[dict(r) for r in conn.execute("SELECT * FROM paper_orders ORDER BY id DESC LIMIT 200")]}
 
 
+def paper_daily_pnl(currency: str, total_equity: float, trading_date: str) -> float:
+    """Persist the first observed equity of a day and compare subsequent marks to it."""
+    with connection() as conn:
+        conn.execute("INSERT OR IGNORE INTO paper_daily_equity(trading_date,currency,opening_equity) VALUES(?,?,?)",
+                     (trading_date,currency,total_equity))
+        row=conn.execute("SELECT opening_equity FROM paper_daily_equity WHERE trading_date=? AND currency=?",
+                         (trading_date,currency)).fetchone()
+        return round(total_equity-float(row["opening_equity"]),2)
+
+
+def _paper_currency(symbol: str, asset_type: str) -> str:
+    if asset_type == "crypto": return "USDT"
+    return "CNY" if re.fullmatch(r"\d{6}(?:\.(?:SH|SZ))?", symbol.upper()) else "USD"
+
+
 def execute_paper_order(symbol: str, name: str, asset_type: str, side: str, price: float, quantity: float, fee_rate: float) -> dict:
-    currency="USDT" if asset_type=="crypto" else "CNY";side=side.upper();amount=price*quantity;fee=amount*fee_rate
+    currency=_paper_currency(symbol,asset_type);side=side.upper();amount=price*quantity;fee=amount*fee_rate
     if quantity<=0 or price<=0:raise ValueError("数量和价格必须大于 0")
     with connection() as conn:
         account=conn.execute("SELECT * FROM paper_accounts WHERE currency=?",(currency,)).fetchone();position=conn.execute("SELECT * FROM paper_positions WHERE symbol=? AND asset_type=?",(symbol,asset_type)).fetchone()
@@ -285,12 +314,71 @@ def execute_paper_order(symbol: str, name: str, asset_type: str, side: str, pric
             conn.execute("UPDATE paper_accounts SET cash=cash-? WHERE currency=?",(required,currency))
             conn.execute("INSERT INTO paper_positions(symbol,asset_type,currency,quantity,average_cost) VALUES(?,?,?,?,?) ON CONFLICT(symbol,asset_type) DO UPDATE SET quantity=excluded.quantity,average_cost=excluded.average_cost,updated_at=CURRENT_TIMESTAMP",(symbol,asset_type,currency,new_q,avg))
         elif side=="SELL":
-            if not position or position["quantity"]+1e-12<quantity:raise ValueError("模拟持仓数量不足")
+            if not position or position["quantity"]-position["frozen_quantity"]+1e-12<quantity:raise ValueError("模拟持仓数量不足或已被限价单冻结")
             conn.execute("UPDATE paper_accounts SET cash=cash+? WHERE currency=?",(amount-fee,currency))
             conn.execute("UPDATE paper_positions SET quantity=quantity-?,updated_at=CURRENT_TIMESTAMP WHERE symbol=? AND asset_type=?",(quantity,symbol,asset_type))
         else:raise ValueError("side 必须是 BUY 或 SELL")
-        cur=conn.execute("INSERT INTO paper_orders(symbol,name,asset_type,side,price,quantity,fee,amount,currency) VALUES(?,?,?,?,?,?,?,?,?)",(symbol,name,asset_type,side,price,quantity,fee,amount,currency))
+        cur=conn.execute("INSERT INTO paper_orders(symbol,name,asset_type,side,price,quantity,fee,amount,currency,order_type,status,filled_at) VALUES(?,?,?,?,?,?,?,?,?,'MARKET','filled',CURRENT_TIMESTAMP)",(symbol,name,asset_type,side,price,quantity,fee,amount,currency))
         return dict(conn.execute("SELECT * FROM paper_orders WHERE id=?",(cur.lastrowid,)).fetchone())
+
+
+def create_limit_order(symbol: str, name: str, asset_type: str, side: str, limit_price: float,
+                       quantity: float, fee_rate: float) -> dict:
+    currency=_paper_currency(symbol,asset_type);side=side.upper()
+    if quantity<=0 or limit_price<=0:raise ValueError("数量和限价必须大于0")
+    reserved=limit_price*quantity*(1+fee_rate)
+    with connection() as conn:
+        if side=="BUY":
+            account=conn.execute("SELECT * FROM paper_accounts WHERE currency=?",(currency,)).fetchone()
+            if not account:conn.execute("INSERT INTO paper_accounts(currency,cash,initial_cash,frozen_cash) VALUES(?,?,?,0)",(currency,100000,100000));account=conn.execute("SELECT * FROM paper_accounts WHERE currency=?",(currency,)).fetchone()
+            if account["cash"]<reserved:raise ValueError("模拟账户可用资金不足")
+            conn.execute("UPDATE paper_accounts SET cash=cash-?,frozen_cash=frozen_cash+? WHERE currency=?",(reserved,reserved,currency))
+        elif side=="SELL":
+            pos=conn.execute("SELECT * FROM paper_positions WHERE symbol=? AND asset_type=?",(symbol,asset_type)).fetchone()
+            if not pos or pos["quantity"]-pos["frozen_quantity"]+1e-12<quantity:raise ValueError("可卖持仓数量不足")
+            conn.execute("UPDATE paper_positions SET frozen_quantity=frozen_quantity+? WHERE symbol=? AND asset_type=?",(quantity,symbol,asset_type))
+        else:raise ValueError("side 必须是 BUY 或 SELL")
+        cur=conn.execute("""INSERT INTO paper_orders(symbol,name,asset_type,side,price,limit_price,quantity,fee,amount,currency,order_type,status)
+            VALUES(?,?,?,?,?,?,?,?,?,?,'LIMIT','pending')""",(symbol,name,asset_type,side,limit_price,limit_price,quantity,0,limit_price*quantity,currency))
+        return dict(conn.execute("SELECT * FROM paper_orders WHERE id=?",(cur.lastrowid,)).fetchone())
+
+
+def fill_limit_order(order_id: int, market_price: float, fee_rate: float) -> dict | None:
+    with connection() as conn:
+        order=conn.execute("SELECT * FROM paper_orders WHERE id=? AND status='pending'",(order_id,)).fetchone()
+        if not order:return None
+        if order["side"]=="BUY" and market_price>order["limit_price"]:return None
+        if order["side"]=="SELL" and market_price<order["limit_price"]:return None
+        quantity=float(order["quantity"]);amount=market_price*quantity;fee=amount*fee_rate
+        if order["side"]=="BUY":
+            reserved=order["limit_price"]*quantity*(1+fee_rate)
+            conn.execute("UPDATE paper_accounts SET frozen_cash=frozen_cash-?,cash=cash+? WHERE currency=?",(reserved,reserved-amount-fee,order["currency"]))
+            pos=conn.execute("SELECT * FROM paper_positions WHERE symbol=? AND asset_type=?",(order["symbol"],order["asset_type"])).fetchone();oldq=pos["quantity"] if pos else 0;oldcost=pos["average_cost"]*oldq if pos else 0;newq=oldq+quantity;avg=(oldcost+amount+fee)/newq
+            conn.execute("INSERT INTO paper_positions(symbol,asset_type,currency,quantity,average_cost) VALUES(?,?,?,?,?) ON CONFLICT(symbol,asset_type) DO UPDATE SET quantity=excluded.quantity,average_cost=excluded.average_cost,updated_at=CURRENT_TIMESTAMP",(order["symbol"],order["asset_type"],order["currency"],newq,avg))
+        else:
+            conn.execute("UPDATE paper_positions SET quantity=quantity-?,frozen_quantity=frozen_quantity-?,updated_at=CURRENT_TIMESTAMP WHERE symbol=? AND asset_type=?",(quantity,quantity,order["symbol"],order["asset_type"]))
+            conn.execute("UPDATE paper_accounts SET cash=cash+? WHERE currency=?",(amount-fee,order["currency"]))
+        conn.execute("UPDATE paper_orders SET price=?,amount=?,fee=?,status='filled',filled_at=CURRENT_TIMESTAMP WHERE id=?",(market_price,amount,fee,order_id))
+        return dict(conn.execute("SELECT * FROM paper_orders WHERE id=?",(order_id,)).fetchone())
+
+
+def cancel_paper_order(order_id: int) -> dict:
+    with connection() as conn:
+        order=conn.execute("SELECT * FROM paper_orders WHERE id=?",(order_id,)).fetchone()
+        if not order:raise ValueError("订单不存在")
+        if order["status"]!="pending":raise ValueError("只有待成交订单可以撤销")
+        fee_rate=.001 if order["asset_type"]=="crypto" else .0003
+        if order["side"]=="BUY":
+            reserved=order["limit_price"]*order["quantity"]*(1+fee_rate);conn.execute("UPDATE paper_accounts SET cash=cash+?,frozen_cash=frozen_cash-? WHERE currency=?",(reserved,reserved,order["currency"]))
+        else:conn.execute("UPDATE paper_positions SET frozen_quantity=frozen_quantity-? WHERE symbol=? AND asset_type=?",(order["quantity"],order["symbol"],order["asset_type"]))
+        conn.execute("UPDATE paper_orders SET status='cancelled',cancelled_at=CURRENT_TIMESTAMP WHERE id=?",(order_id,))
+        return dict(conn.execute("SELECT * FROM paper_orders WHERE id=?",(order_id,)).fetchone())
+
+
+def reset_paper_accounts() -> None:
+    with connection() as conn:
+        conn.execute("DELETE FROM paper_orders");conn.execute("DELETE FROM paper_positions");conn.execute("DELETE FROM paper_daily_equity")
+        conn.execute("UPDATE paper_accounts SET cash=initial_cash,frozen_cash=0")
 
 
 def save_backtest(symbol: str, asset_type: str, strategy: str, interval: str, result: dict) -> int:

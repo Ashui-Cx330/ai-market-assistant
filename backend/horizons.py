@@ -9,7 +9,7 @@ import pandas as pd
 UTC = timezone.utc
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 INTERVAL_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
-HORIZON_MINUTES = {"1H": 60, "4H": 240, "1D": 1440}
+HORIZON_MINUTES = {"1H": 60, "4H": 240, "1D": 1440, "T+5": 7200, "T+20": 28800}
 
 
 def utc_timestamps(values: list[dict] | list[str]) -> pd.DatetimeIndex:
@@ -29,6 +29,7 @@ def supported_horizons(interval: str) -> dict[str, int]:
     bar = INTERVAL_MINUTES[interval]
     result: dict[str, int] = {}
     for label, duration in HORIZON_MINUTES.items():
+        if label in {"T+5","T+20"} and interval != "1d": continue
         if duration >= bar and duration % bar == 0:
             result[label] = duration // bar
     return result
@@ -95,13 +96,17 @@ def future_timestamp(value: datetime | pd.Timestamp, asset_type: str, interval: 
     stamp = stamp.tz_localize(UTC) if stamp.tzinfo is None else stamp.tz_convert(UTC)
     if asset_type == "crypto":
         return stamp + timedelta(minutes=HORIZON_MINUTES[horizon])
-    if interval == "1d" or horizon == "1D":
-        # A-share 1D means the same point in the next trading session, not 1,440
-        # exchange-open minutes (six sessions). Actual holiday gaps are handled
-        # by alignment against the observed candle timestamps.
+    if interval == "1d":
+        # Advance by the requested number of daily trading bars. Exchange
+        # holidays are resolved by training alignment against observed bars;
+        # the future display can conservatively skip weekends only.
         local = stamp.tz_convert(SHANGHAI)
-        next_day = _next_weekday(local.date())
-        return pd.Timestamp(datetime.combine(next_day, local.time()), tz=SHANGHAI).tz_convert(UTC)
+        target_day=local.date()
+        for _ in range(supported_horizons(interval)[horizon]):target_day=_next_weekday(target_day)
+        return pd.Timestamp(datetime.combine(target_day, local.time()), tz=SHANGHAI).tz_convert(UTC)
+    if horizon == "1D":
+        local = stamp.tz_convert(SHANGHAI);next_day=_next_weekday(local.date())
+        return pd.Timestamp(datetime.combine(next_day,local.time()),tz=SHANGHAI).tz_convert(UTC)
     return add_stock_trading_minutes(stamp, HORIZON_MINUTES[horizon])
 
 

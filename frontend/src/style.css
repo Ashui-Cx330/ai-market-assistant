@@ -854,6 +854,11 @@ footer {
 .news-backtest-form { display:grid;grid-template-columns:120px 1fr 1fr 100px auto;gap:10px;align-items:end;margin-top:16px;padding-top:14px;border-top:1px solid #203b50; }
 .impact-banner { display:flex;justify-content:space-between;padding:14px;margin:15px 0;background:#102f36;border-radius:10px;color:#50e3b5; }
 .news-detail-dialog small,.news-detail-dialog p,.news-detail-dialog li { color:#7890a8;line-height:1.7; }
+.market-workspace,.prediction-workspace,.strategy-workspace { display:grid;gap:14px; }.market-guide h2,.prediction-workspace h2,.strategy-workspace h2 { font-size:32px;margin:8px 0; }
+.market-directory { display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:12px; }.market-directory button { padding:20px; }
+.prediction-meta { display:flex;gap:18px;flex-wrap:wrap;color:#7890a8;font-size:10px;margin:12px 0; }.prediction-workspace .prediction-grid,.news-detail-dialog .prediction-grid { display:grid;grid-template-columns:repeat(3,1fr);gap:10px; }.prediction-workspace .prediction-card,.news-detail-dialog .prediction-grid article { padding:16px;background:#0d2030;border:1px solid #203b50;border-radius:11px;display:grid;gap:8px; }.prediction-evidence,.analysis-divider { border-top:1px solid #294057;margin-top:16px;padding-top:14px; }
+.strategy-controls { display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin:18px 0; }.strategy-controls label { color:#7890a8;font-size:10px; }.strategy-controls input { width:100%;box-sizing:border-box;margin-top:5px; }
+.paper-layout { display:grid;grid-template-columns:340px 1fr;gap:12px;margin:14px 0; }.order-ticket label { display:block;color:#7890a8;font-size:10px;margin:12px 0; }.order-ticket input,.order-ticket select { width:100%;box-sizing:border-box;margin-top:5px; }.selected-order-asset { display:flex;justify-content:space-between;padding:13px;background:#0a1927;border-radius:9px; }.order-actions { display:grid;grid-template-columns:1fr 1fr;gap:8px; }.order-actions button { padding:12px; }.position-row,.paper-order-head,.paper-order-row { display:grid;grid-template-columns:repeat(6,1fr) auto;gap:8px;align-items:center;padding:10px;border-bottom:1px solid #1c3144;font-size:10px; }.paper-order-head { color:#70869c;font-weight:600;grid-template-columns:repeat(6,1fr); }.paper-order-row { grid-template-columns:1.4fr .7fr 1fr 1.2fr .7fr 1fr; }.link-button { color:#55dcb8;background:transparent;border:0;text-align:left;padding:0; }.dialog-actions { display:flex;gap:8px;align-items:center;margin-top:16px; }
 @media (max-width: 1100px) {
   .grid {
     grid-template-columns: repeat(2, 1fr);
@@ -910,4 +915,5 @@ footer {
   }
   .strategy-grid, .structure-summary, .evidence-columns { grid-template-columns: 1fr; }
   .news-filters,.news-backtest-form { grid-template-columns:1fr; }
+  .paper-layout,.strategy-controls,.market-directory,.prediction-workspace .prediction-grid,.news-detail-dialog .prediction-grid { grid-template-columns:1fr; }
 }

@@ -18,15 +18,16 @@ from pydantic import BaseModel, Field
 
 from .ai_engine import feature_frame, predict
 from .backtest import run_backtest
-from .database import (DB_PATH, add_watchlist, connection, execute_paper_order, init_db, list_backtests, list_watchlist,
+from .database import (DB_PATH, add_watchlist, cancel_paper_order, connection, create_limit_order, execute_paper_order,
+                       fill_limit_order, init_db, list_backtests, list_watchlist,
                        get_news_intelligence, load_news_intelligence, load_provider_health, query_news_intelligence,
-                       paper_snapshot, prediction_history, prediction_statistics, remove_watchlist,
+                       paper_daily_pnl, paper_snapshot, prediction_history, prediction_statistics, remove_watchlist,
                        resolve_prediction_history, save_backtest, save_external_feature_observations,
                        save_feature_observations, save_historical_event_outcomes, save_news_intelligence,
-                       save_prediction_history, save_provider_health)
+                       reset_paper_accounts, save_prediction_history, save_provider_health)
 from .indicators import indicator_payload
 from .market import (crypto_derivatives, crypto_kline, crypto_onchain, crypto_quote, crypto_search, event_risk,
-                     cross_validate_quote, macro_context, macro_history, news_context, normalize_crypto, stock_fundamental, stock_kline, stock_quote,
+                     canonical_symbol, cross_validate_quote, macro_context, macro_history, news_context, normalize_crypto, stock_fundamental, stock_kline, stock_quote,
                      stock_financial_history, stock_search)
 from .providers import fetch_quotes
 from .feature_services import FeatureStore
@@ -61,6 +62,10 @@ def ok(data=None, message="成功", source=None) -> dict:
     result = {"success": True, "message": message, "data": data}
     if source: result["source"] = source
     return result
+
+
+def resolved_symbol(symbol: str, asset_type: str) -> str:
+    return canonical_symbol(symbol, asset_type.lower())
 
 
 @app.exception_handler(HTTPException)
@@ -128,6 +133,8 @@ class PaperOrderRequest(BaseModel):
     side: str
     quantity: float | None = Field(default=None, gt=0)
     amount: float | None = Field(default=None, gt=0)
+    order_type: str = "MARKET"
+    price: float | None = Field(default=None, gt=0)
 
 
 class NewsBacktestRequest(BaseModel):
@@ -178,7 +185,7 @@ async def news_intelligence(symbol: str | None = None, asset_type: str = "stock"
                             category: str | None = None, direction: str | None = None,
                             keyword: str | None = None, hours: int | None = Query(default=None, ge=1, le=24*365),
                             page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100)) -> dict:
-    normalized = normalize_crypto(symbol) if symbol and asset_type == "crypto" else symbol
+    normalized = resolved_symbol(symbol, asset_type) if symbol else symbol
     rows, statuses = await collect_news(normalized, name, market, keyword, 50)
     technical_score = volume_ratio = None
     if normalized:
@@ -217,7 +224,7 @@ def news_feed(symbol: str | None = None, market: str | None = None, category: st
 
 @app.post("/api/news/backtest")
 async def news_backtest(body: NewsBacktestRequest) -> dict:
-    symbol = normalize_crypto(body.symbol) if body.asset_type == "crypto" else body.symbol
+    symbol = resolved_symbol(body.symbol, body.asset_type)
     historical_status=[]
     if body.refresh_historical:
         rows,historical_status=await collect_historical_news(symbol,limit=100,pages=3)
@@ -247,22 +254,33 @@ def news_item(news_id: str) -> dict:
 async def realtime_websocket(websocket: WebSocket) -> None:
     await websocket.accept()
     queue = realtime_manager.bus.subscribe()
+    send_lock=asyncio.Lock()
+
+    async def send(payload: dict) -> None:
+        # Starlette/websockets cannot safely accept concurrent frame writes.
+        try:
+            async with send_lock: await websocket.send_json(payload)
+        except RuntimeError as exc:
+            if "once a close message has been sent" in str(exc):
+                raise WebSocketDisconnect(code=1000) from exc
+            raise
 
     async def forward() -> None:
         while True:
-            await websocket.send_json(await queue.get())
+            await send(await queue.get())
 
     async def receive() -> None:
-        await websocket.send_json({"type":"hello","data":{"status":"CONNECTED","serverTimestamp":utc_now()}})
         while True:
             message = await websocket.receive_json()
             if message.get("action") == "subscribe":
                 state = await realtime_manager.subscribe(str(message.get("asset_type")), str(message.get("symbol")),
                                                          str(message.get("interval") or "1m"))
-                await websocket.send_json({"type":"snapshot","key":realtime_manager.store.key(state.asset_type,state.symbol,state.interval),
-                                           "data":state.snapshot(),"serverTimestamp":utc_now()})
+                await send({"type":"snapshot","key":realtime_manager.store.key(state.asset_type,state.symbol,state.interval),
+                            "data":state.snapshot(),"serverTimestamp":utc_now()})
             elif message.get("action") == "ping":
-                await websocket.send_json({"type":"pong","data":{"serverTimestamp":utc_now()}})
+                await send({"type":"pong","data":{"serverTimestamp":utc_now()}})
+    # Establish protocol ordering before the global event bus can forward data.
+    await send({"type":"hello","data":{"status":"CONNECTED","serverTimestamp":utc_now()}})
     sender=asyncio.create_task(forward());receiver=asyncio.create_task(receive())
     try:
         done,pending=await asyncio.wait({sender,receiver},return_when=asyncio.FIRST_COMPLETED)
@@ -343,7 +361,7 @@ async def api_crypto_kline(symbol: str, interval: str = "1h", limit: int = Query
 
 @app.post("/api/ai/predict")
 async def api_predict(body: PredictionRequest) -> dict:
-    symbol = normalize_crypto(body.symbol) if body.asset_type == "crypto" else body.symbol
+    symbol = resolved_symbol(body.symbol, body.asset_type)
     # Keep enough chronological history for genuine train/calibration/test and
     # walk-forward evaluation. Providers may return fewer real rows.
     wanted = 3000 if body.asset_type == "crypto" else (2500 if body.interval == "1d" else 1200)
@@ -525,7 +543,7 @@ async def ai_portfolio_risk() -> dict:
 
 @app.post("/api/backtest/run")
 async def api_backtest(body: BacktestRequest) -> dict:
-    symbol = normalize_crypto(body.symbol) if body.asset_type == "crypto" else body.symbol
+    symbol = resolved_symbol(body.symbol, body.asset_type)
     data, source = await _kline(body.asset_type, symbol, body.interval, body.limit)
     fee = body.fee_rate if body.fee_rate is not None else (.001 if body.asset_type == "crypto" else .0003)
     legacy_strategies = {"ma", "macd", "rsi", "ai", "ai_technical"}
@@ -578,7 +596,7 @@ def strategy_leaderboard(limit: int = Query(200, ge=1, le=1000)) -> dict:
 
 @app.post("/api/strategy/analyze")
 async def strategy_analyze(body: PredictionRequest) -> dict:
-    symbol = normalize_crypto(body.symbol) if body.asset_type == "crypto" else body.symbol
+    symbol = resolved_symbol(body.symbol, body.asset_type)
     data, source = await _kline(body.asset_type, symbol, body.interval, 1200)
     result = await asyncio.to_thread(StrategyEngine().analyze, data["candles"], body.interval, source)
     result.update({"symbol": symbol, "asset_type": body.asset_type, "interval": body.interval, "data_source": source})
@@ -588,7 +606,7 @@ async def strategy_analyze(body: PredictionRequest) -> dict:
 @app.post("/api/strategy/backtest")
 async def strategy_lab(body: StrategyBacktestRequest) -> dict:
     if body.strategy not in SIGNAL_KEYS: raise HTTPException(400, "未知 V5 策略")
-    symbol = normalize_crypto(body.symbol) if body.asset_type == "crypto" else body.symbol
+    symbol = resolved_symbol(body.symbol, body.asset_type)
     data, source = await _kline(body.asset_type, symbol, body.interval, body.limit)
     rows = data["candles"]
     if body.start_time or body.end_time:
@@ -620,7 +638,7 @@ async def strategy_lab(body: StrategyBacktestRequest) -> dict:
 
 @app.post("/api/strategy/incremental-experiment")
 async def strategy_incremental(body: StrategyBacktestRequest) -> dict:
-    symbol = normalize_crypto(body.symbol) if body.asset_type == "crypto" else body.symbol
+    symbol = resolved_symbol(body.symbol, body.asset_type)
     data, source = await _kline(body.asset_type, symbol, body.interval, body.limit)
     result = await asyncio.to_thread(strategy_incremental_experiment, data["candles"], body.interval)
     result["ml_ablation"] = await asyncio.to_thread(ml_ict_incremental_experiment, data["candles"], body.interval, body.asset_type)
@@ -630,18 +648,35 @@ async def strategy_incremental(body: StrategyBacktestRequest) -> dict:
 
 @app.post("/api/paper/order")
 async def paper_order(body: PaperOrderRequest) -> dict:
-    asset_type = body.asset_type.lower(); symbol = normalize_crypto(body.symbol) if asset_type == "crypto" else body.symbol
+    asset_type = body.asset_type.lower(); symbol = resolved_symbol(body.symbol, asset_type)
     quote = await (crypto_quote(symbol) if asset_type == "crypto" else stock_quote(symbol)); price = float(quote["price"])
     quantity = body.quantity; fee_rate = .001 if asset_type == "crypto" else .0003
     if quantity is None:
         if body.amount is None: raise HTTPException(400, "quantity 或 amount 至少填写一个")
         quantity = body.amount / (price * (1 + fee_rate)) if body.side.upper() == "BUY" else body.amount / price
-    order = execute_paper_order(symbol, quote["name"], asset_type, body.side, price, quantity, fee_rate)
-    return ok(order, message="模拟订单已成交", source=quote["source"])
+    order_type=body.order_type.upper()
+    if order_type=="MARKET":
+        order = execute_paper_order(symbol, quote["name"], asset_type, body.side, price, quantity, fee_rate)
+        return ok(order, message="模拟市价订单已成交", source=quote["source"])
+    if order_type!="LIMIT" or body.price is None:raise HTTPException(400,"限价单必须填写有效限价")
+    should_fill=(body.side.upper()=="BUY" and price<=body.price) or (body.side.upper()=="SELL" and price>=body.price)
+    if should_fill:
+        pending=create_limit_order(symbol,quote["name"],asset_type,body.side,body.price,quantity,fee_rate)
+        order=fill_limit_order(pending["id"],price,fee_rate)
+        return ok(order,message="模拟限价订单已按当前真实行情成交",source=quote["source"])
+    order=create_limit_order(symbol,quote["name"],asset_type,body.side,body.price,quantity,fee_rate)
+    return ok(order,message="模拟限价订单已挂单，资金或持仓已冻结",source=quote["source"])
 
 
 async def _marked_snapshot() -> dict:
     snapshot = paper_snapshot(); marked = []
+    # Re-evaluate pending limits only against observed provider quotes.
+    for order in [x for x in snapshot["orders"] if x.get("status")=="pending"]:
+        try:
+            q=await (crypto_quote(order["symbol"],True) if order["asset_type"]=="crypto" else stock_quote(order["symbol"],True))
+            fill_limit_order(order["id"],float(q["price"]),.001 if order["asset_type"]=="crypto" else .0003)
+        except Exception:pass
+    snapshot=paper_snapshot()
     for position in snapshot["positions"]:
         try:
             quote = await (crypto_quote(position["symbol"]) if position["asset_type"] == "crypto" else stock_quote(position["symbol"])); price = quote["price"]
@@ -652,12 +687,20 @@ async def _marked_snapshot() -> dict:
     snapshot["positions"] = marked
     for account in snapshot["accounts"]:
         value = sum(p["market_value"] or 0 for p in marked if p["currency"] == account["currency"])
-        account["total_equity"] = round(account["cash"]+value, 2); account["return_percent"] = round((account["total_equity"]/account["initial_cash"]-1)*100, 2)
+        account["available_cash"]=account["cash"];account["position_market_value"]=round(value,2)
+        account["total_equity"] = round(account["cash"]+account.get("frozen_cash",0)+value, 2); account["cumulative_pnl"]=round(account["total_equity"]-account["initial_cash"],2);account["return_percent"] = round((account["total_equity"]/account["initial_cash"]-1)*100, 2)
+        account["today_pnl"]=paper_daily_pnl(account["currency"],account["total_equity"],utc_now()[:10])
     return snapshot
 
 
 @app.get("/api/paper/account")
 async def paper_account() -> dict: return ok((await _marked_snapshot())["accounts"])
+
+
+@app.get("/api/paper/snapshot")
+async def paper_complete_snapshot() -> dict:
+    """Return one internally consistent mark for all paper-trading panels."""
+    return ok(await _marked_snapshot())
 
 
 @app.get("/api/paper/positions")
@@ -666,6 +709,17 @@ async def paper_positions() -> dict: return ok((await _marked_snapshot())["posit
 
 @app.get("/api/paper/orders")
 def paper_orders() -> dict: return ok(paper_snapshot()["orders"])
+
+
+@app.post("/api/paper/orders/{order_id}/cancel")
+def paper_cancel(order_id: int) -> dict:
+    try:return ok(cancel_paper_order(order_id),"模拟挂单已撤销，冻结资产已释放")
+    except ValueError as exc:raise HTTPException(400,str(exc))
+
+
+@app.post("/api/paper/reset")
+def paper_reset() -> dict:
+    reset_paper_accounts();return ok({"reset":True},"模拟账户已恢复初始资金")
 
 
 @app.get("/api/watchlist")
@@ -677,7 +731,7 @@ def get_watchlist() -> dict:
 def create_watchlist(item: WatchlistItem) -> dict:
     asset_type = item.asset_type.lower()
     if asset_type not in {"stock", "crypto"}: raise HTTPException(400, "asset_type 必须是 stock 或 crypto")
-    symbol = normalize_crypto(item.symbol) if asset_type == "crypto" else item.symbol.strip()
+    symbol = resolved_symbol(item.symbol, asset_type)
     add_watchlist(symbol, asset_type, item.name); return ok({"symbol": symbol, "asset_type": asset_type, "name": item.name}, "已加入自选")
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
@@ -14,6 +15,21 @@ from .providers import CRYPTO_NAMES, STOCKS, _eastmoney_secid, get_crypto_quote,
 HEADERS = {"User-Agent": "Mozilla/5.0 TradingAI/0.3", "Referer": "https://quote.eastmoney.com/"}
 INTERVALS = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "1h": "1H", "4h": "4H", "1d": "1D"}
 STOCK_KLT = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "1d": 101}
+YAHOO_INTERVALS={"1m":("1m","7d"),"5m":("5m","1mo"),"15m":("15m","1mo"),"30m":("30m","1mo"),"1h":("60m","2y"),"4h":("60m","2y"),"1d":("1d","5y")}
+
+def normalize_stock_symbol(symbol: str) -> str:
+    value=symbol.upper().strip().replace("NASDAQ:","").replace("NYSE:","")
+    if value.startswith(("SH","SZ")) and len(value)==8:value=value[2:]
+    if value.endswith((".SH",".SZ")):value=value[:-3]
+    return value
+
+def canonical_symbol(symbol: str, asset_type: str) -> str:
+    value=normalize_crypto(symbol) if asset_type=="crypto" else normalize_stock_symbol(symbol)
+    if asset_type=="crypto":return value
+    if value.isdigit() and len(value)==6:return f"{value}.{'SH' if value.startswith(('5','6','9')) else 'SZ'}"
+    return value
+
+def _us_stock(symbol:str)->bool:return bool(re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}",normalize_stock_symbol(symbol)))
 
 
 def normalize_crypto(symbol: str) -> str:
@@ -24,6 +40,12 @@ async def stock_search(query: str) -> list[dict]:
     key = f"stock-search:{query.lower()}"
     if cached := cache.get(key): return cached
     async with httpx.AsyncClient(timeout=8, headers=HEADERS) as client:
+        if re.search(r"[A-Za-z]",query):
+            try:
+                response=await client.get("https://query1.finance.yahoo.com/v1/finance/search",params={"q":query.strip(),"quotesCount":12,"newsCount":0});response.raise_for_status()
+                results=[{"symbol":row["symbol"],"name":row.get("shortname") or row.get("longname") or row["symbol"],"asset_type":"stock","market":"美股","currency":"USD","canonical_symbol":row["symbol"],"source":"Yahoo Finance 搜索"} for row in response.json().get("quotes",[]) if row.get("quoteType") in {"EQUITY","ETF","INDEX"} and row.get("symbol")]
+                if results:return cache.set(key,results[:15],300)
+            except Exception:pass
         try:
             response = await client.get("https://searchapi.eastmoney.com/api/suggest/get",
                                         params={"input": query.strip(), "type": 14, "count": 15})
@@ -61,9 +83,16 @@ async def crypto_search(query: str) -> list[dict]:
 
 
 async def stock_quote(symbol: str, force_refresh: bool = False) -> dict:
+    symbol=normalize_stock_symbol(symbol)
     key = f"stock-quote:{symbol}"
     if not force_refresh and (cached := cache.get(key)): return cached
     async with httpx.AsyncClient(timeout=8, headers=HEADERS, follow_redirects=True) as client:
+        if _us_stock(symbol):
+            response=await client.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",params={"interval":"1m","range":"1d"});response.raise_for_status();node=response.json()["chart"]["result"][0];meta=node["meta"]
+            price=float(meta.get("regularMarketPrice"));previous=float(meta.get("chartPreviousClose") or meta.get("previousClose") or price);quote=node.get("indicators",{}).get("quote",[{}])[0]
+            highs=[x for x in quote.get("high",[]) if x is not None];lows=[x for x in quote.get("low",[]) if x is not None];volumes=[x for x in quote.get("volume",[]) if x is not None]
+            result={"symbol":symbol,"canonical_symbol":symbol,"name":meta.get("shortName") or meta.get("longName") or symbol,"asset_type":"stock","market":"美股","currency":meta.get("currency") or "USD","price":price,"change":price-previous,"change_percent":((price/previous)-1)*100 if previous else 0,"open":float(meta.get("regularMarketOpen") or previous),"previous_close":previous,"high":float(meta.get("regularMarketDayHigh") or max(highs,default=price)),"low":float(meta.get("regularMarketDayLow") or min(lows,default=price)),"volume":float(meta.get("regularMarketVolume") or (volumes[-1] if volumes else 0)),"amount":None,"source":"Yahoo Finance public chart API","updated_at":datetime.fromtimestamp(int(meta.get("regularMarketTime") or datetime.now().timestamp()),timezone.utc).isoformat()}
+            return cache.set(key,result,8)
         try:
             response = await client.get("https://push2.eastmoney.com/api/qt/stock/get",
                 params={"secid": _eastmoney_secid(symbol), "fields": "f43,f44,f45,f46,f47,f48,f57,f58,f60,f169,f170"})
@@ -159,6 +188,21 @@ def _aggregate(candles: list[dict], rule: str) -> list[dict]:
 
 
 async def stock_kline(symbol: str, interval: str, limit: int = 400, force_refresh: bool = False) -> tuple[list[dict], str]:
+    symbol=normalize_stock_symbol(symbol)
+    if _us_stock(symbol):
+        if interval not in YAHOO_INTERVALS:raise ValueError("美股支持 1m/5m/15m/30m/1h/4h/1d")
+        key=f"stock-kline:{symbol}:{interval}:{limit}"
+        if not force_refresh and (cached:=cache.get(key)):return cached
+        yahoo_interval,range_value=YAHOO_INTERVALS[interval]
+        async with httpx.AsyncClient(timeout=18,headers=HEADERS,follow_redirects=True) as client:
+            response=await client.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",params={"interval":yahoo_interval,"range":range_value,"events":"history"});response.raise_for_status();node=response.json()["chart"]["result"][0];quotes=node["indicators"]["quote"][0];candles=[]
+            for i,stamp in enumerate(node.get("timestamp",[])):
+                values=[quotes.get(k,[None]*len(node.get("timestamp",[])))[i] for k in ("open","high","low","close")]
+                if any(v is None for v in values):continue
+                candles.append({"timestamp":datetime.fromtimestamp(stamp,timezone.utc).isoformat(),"open":float(values[0]),"high":float(values[1]),"low":float(values[2]),"close":float(values[3]),"volume":float(quotes.get("volume",[0])[i] or 0),"amount":0.0})
+            if interval=="4h":candles=_aggregate(candles,"4h")
+            if not candles:raise RuntimeError("Yahoo Finance 未返回美股K线")
+            return cache.set(key,(candles[-limit:],"Yahoo Finance public chart API"),20 if interval!="1d" else 300)
     requested = interval; source_interval = "1h" if interval == "4h" else interval
     if source_interval not in STOCK_KLT: raise ValueError("A股支持 1m/5m/15m/30m/1h/4h/1d")
     key=f"stock-kline:{symbol}:{interval}:{limit}"
@@ -390,6 +434,8 @@ async def event_risk() -> dict:
 
 
 async def stock_fundamental(symbol: str) -> dict:
+    symbol=normalize_stock_symbol(symbol)
+    if _us_stock(symbol):return {"status":"NOT_AVAILABLE","source":None,"reason":"免费Yahoo图表接口不提供可审计基本面字段"}
     key=f"external:fundamental:{symbol}"
     if cached:=cache.get(key): return cached
     market="sh" if symbol.startswith(("5","6","9")) else "sz"
@@ -406,6 +452,8 @@ async def stock_fundamental(symbol: str) -> dict:
 
 async def stock_financial_history(symbol: str) -> dict:
     """Point-in-time A-share financial statements with public announcement dates."""
+    symbol=normalize_stock_symbol(symbol)
+    if _us_stock(symbol):return {"status":"NOT_AVAILABLE","source":None,"history":[],"reason":"当前免费历史财报Provider仅覆盖A股"}
     key=f"external:financial-history:{symbol}"
     if cached:=cache.get(key):return cached
     try:

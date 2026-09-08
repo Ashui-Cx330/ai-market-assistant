@@ -103,7 +103,7 @@ class RealtimeMarketStore:
             return [state for key, state in self._states.items() if key.startswith(prefix)]
 
     def health(self, state: MarketState, now: float | None = None) -> str:
-        if state.asset_type == "stock" and not self.stock_market_open():
+        if state.asset_type == "stock" and not self.stock_market_open(state.symbol):
             return "MARKET_CLOSED"
         if not state.lastUpdateTime:
             return "CONNECTING"
@@ -118,10 +118,12 @@ class RealtimeMarketStore:
         return "CONNECTED"
 
     @staticmethod
-    def stock_market_open(moment: datetime | None = None) -> bool:
-        local = (moment or datetime.now(timezone.utc)).astimezone(ZoneInfo("Asia/Shanghai"))
+    def stock_market_open(symbol: str = "", moment: datetime | None = None) -> bool:
+        if isinstance(symbol, datetime): moment,symbol=symbol,""
+        is_us=bool(symbol and not symbol.isdigit())
+        local = (moment or datetime.now(timezone.utc)).astimezone(ZoneInfo("America/New_York" if is_us else "Asia/Shanghai"))
         minute = local.hour * 60 + local.minute
-        return local.weekday() < 5 and (570 <= minute < 690 or 780 <= minute < 900)
+        return local.weekday() < 5 and ((570 <= minute < 960) if is_us else (570 <= minute < 690 or 780 <= minute < 900))
 
 
 class BackendEventBus:

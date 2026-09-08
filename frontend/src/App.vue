@@ -25,7 +25,7 @@ import {
 } from "./api";
 import { realtimeMarketStore, type RealtimeEvent } from "./realtime";
 
-type Page = "home" | "detail" | "news" | "paper" | "watchlist" | "settings";
+type Page = "home" | "market" | "detail" | "news" | "prediction" | "strategy" | "paper" | "watchlist" | "settings";
 const page = ref<Page>("home"),
   items = ref<Asset[]>([]),
   appVersion = ref("0.3.0"),
@@ -46,6 +46,7 @@ const selected = ref<Asset | null>(null),
   detailError = ref("");
 const aiLoading = ref(false),
   aiResult = ref<any>(null),
+  aiError=ref(""),
   livePredictionHistory = ref<any[]>([]),
   backtestLoading = ref(false),
   backtestResult = ref<any>(null),
@@ -67,11 +68,13 @@ const newsIntelligence = ref<any>(null),
   newsBacktestImpact=ref(70),newsBacktestConfidence=ref(60),newsBacktestHorizon=ref(5);
 const orderAmount = ref(1000),
   orderLoading = ref(false),
+  orderQuantity=ref(1),orderType=ref("MARKET"),orderLimitPrice=ref<number|null>(null),
   watchlist = ref<any[]>([]),
   paperAccounts = ref<any[]>([]),
   positions = ref<any[]>([]),
   orders = ref<any[]>([]),
   paperLoading = ref(false);
+let paperTimer:number|null=null;
 const updateChecking = ref(false),
   updateStatus = ref("启动时会自动检查更新；也可以在这里手动检查。");
 const cryptos = computed(() =>
@@ -89,6 +92,7 @@ const inWatchlist = computed(
 );
 const periods = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
 const selectedLiveState = computed(() => realtimeMarketStore.states[selectedRealtimeKey()] || {});
+const predictionRows=computed(()=>Object.entries(aiResult.value?.predictions||{}).map(([h,p]:any)=>({horizon:h==='1D'?'T+1':h,...p})));
 const liveStatus = computed(() => selectedLiveState.value.connectionStatus || realtimeMarketStore.connectionStatus.value);
 const v5BacktestStrategies=["breakout","pullback","moving_average","bollinger","rsi_reversal","fibonacci","bos","fvg","fib_fvg_bos"];
 function price(value: number | null | undefined, currency = "") {
@@ -171,9 +175,16 @@ async function searchAssets() {
     searching.value = false;
   }
 }
-async function openAsset(asset: Asset, action?: "ai" | "backtest") {
+function selectSearchAsset(asset:Asset){
+  if(page.value==='paper'){selected.value=asset;orderLimitPrice.value=asset.price||null;realtimeMarketStore.subscribe(asset.asset_type,asset.symbol,asset.asset_type==='crypto'?'1m':'1m');return}
+  if(page.value==='prediction'){selected.value=asset;interval.value=asset.asset_type==='crypto'?'1h':'1d';aiResult.value=null;void Promise.all([loadQuote(),loadKline()]);return}
+  if(page.value==='strategy'){selected.value=asset;interval.value=asset.asset_type==='crypto'?'1h':'1d';backtestResult.value=null;void loadKline();return}
+  openAsset(asset)
+}
+async function openAsset(asset: Asset, action?: "ai" | "backtest", updateUrl=true) {
   selected.value = asset;
   page.value = "detail";
+  if(updateUrl)history.pushState({},"",`/${asset.asset_type==='crypto'?'crypto':'stock'}/${encodeURIComponent(asset.symbol)}`);
   searchOpen.value = false;
   quote.value = null;
   candles.value = [];
@@ -213,6 +224,9 @@ async function showNews() {
 }
 
 function openNews(item:any){const outcome=(newsBacktest.value?.outcomes||[]).find((x:any)=>x.news_id===item.id);newsSelected.value=outcome?{...item,historical_outcome:outcome}:item;newsDialogOpen.value=true}
+function assetFromSymbol(symbol:string):Asset{const crypto=['BTC','ETH','SOL','BNB'].includes(symbol);return {symbol,name:symbol,asset_type:crypto?'crypto':'stock'}}
+function openNewsSymbol(symbol:string){newsDialogOpen.value=false;openAsset(assetFromSymbol(symbol))}
+async function tradeNewsSymbol(symbol:string){newsDialogOpen.value=false;selected.value=assetFromSymbol(symbol);await showPaper()}
 function newsClass(item:any){return item?.sentiment?.label==='bullish'?'positive':item?.sentiment?.label==='bearish'?'negative':'neutral'}
 function stars(score:number){return '★'.repeat(Math.max(1,Math.ceil((score||0)/20)))+'☆'.repeat(Math.max(0,5-Math.ceil((score||0)/20)))}
 async function applyNewsFilters(){newsPage.value=1;await loadNews()}
@@ -263,6 +277,7 @@ async function changeInterval(value: string) {
 async function runAI(options?:{silent?:boolean;reasons?:string[]}) {
   if (!selected.value) return;
   aiLoading.value = true;
+  aiError.value="";
   aiResult.value = null;
   try {
     aiResult.value = await post<any>("/api/ai/decision", {
@@ -289,7 +304,7 @@ async function runAI(options?:{silent?:boolean;reasons?:string[]}) {
     livePredictionHistory.value=livePredictionHistory.value.slice(0,20);
     if(!options?.silent) ElMessage.success("V7 实时因果策略与交易决策完成");
   } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : "AI预测失败");
+    aiError.value=e instanceof Error ? e.message : "AI预测失败";ElMessage.error(aiError.value);
   } finally {
     aiLoading.value = false;
   }
@@ -303,6 +318,8 @@ function handleRealtime(event:RealtimeEvent){
     const incoming=event.data.quote;
     const index=items.value.findIndex((item)=>item.symbol===incoming.symbol&&item.asset_type===incoming.asset_type);
     if(index>=0)items.value[index]={...items.value[index],...incoming};
+    const held=positions.value.find((p:any)=>p.symbol===incoming.symbol&&p.asset_type===incoming.asset_type);
+    if(held){held.current_price=incoming.price;held.market_value=held.quantity*incoming.price;held.unrealized_pnl=held.market_value-held.quantity*held.average_cost;held.return_percent=(incoming.price/held.average_cost-1)*100}
   }
   if(!selected.value || event.key!==selectedRealtimeKey())return;
   const state=event.type==="candle"?event.data?.state:event.data;
@@ -395,11 +412,9 @@ async function placeOrder(side: "BUY" | "SELL", amount = orderAmount.value) {
 async function loadPaper() {
   paperLoading.value = true;
   try {
-    [paperAccounts.value, positions.value, orders.value] = await Promise.all([
-      request<any[]>("/api/paper/account"),
-      request<any[]>("/api/paper/positions"),
-      request<any[]>("/api/paper/orders"),
-    ]);
+    const snapshot=await request<any>("/api/paper/snapshot");
+    paperAccounts.value=snapshot.accounts;positions.value=snapshot.positions;orders.value=snapshot.orders;
+    positions.value.forEach((p:any)=>realtimeMarketStore.subscribe(p.asset_type,p.symbol,p.asset_type==='crypto'?'1m':'1m'));
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : "账户数据获取失败");
   } finally {
@@ -409,7 +424,16 @@ async function loadPaper() {
 async function showPaper() {
   page.value = "paper";
   await loadPaper();
+  if(paperTimer)window.clearInterval(paperTimer);paperTimer=window.setInterval(()=>{if(page.value==='paper')void loadPaper()},5000);
 }
+async function submitPaperOrder(side:"BUY"|"SELL"){
+  if(!selected.value)return ElMessage.warning("请先搜索并选择交易标的");orderLoading.value=true
+  try{const result=await post<any>("/api/paper/order",{symbol:selected.value.symbol,asset_type:selected.value.asset_type,side,quantity:orderQuantity.value,order_type:orderType.value,price:orderType.value==='LIMIT'?orderLimitPrice.value:null});ElMessage.success(result.status==='pending'?"限价单已挂单":"模拟订单已成交");await loadPaper()}catch(e){ElMessage.error(e instanceof Error?e.message:"下单失败")}finally{orderLoading.value=false}
+}
+async function cancelOrder(id:number){try{await post(`/api/paper/orders/${id}/cancel`,{});ElMessage.success("已撤单");await loadPaper()}catch(e){ElMessage.error(e instanceof Error?e.message:"撤单失败")}}
+async function resetPaper(){if(!confirm("确定清空所有模拟持仓和订单，并恢复初始资金吗？"))return;await post('/api/paper/reset',{});selected.value=null;await loadPaper();ElMessage.success("模拟账户已重置")}
+function openPosition(p:any){openAsset({symbol:p.symbol,name:p.name||p.symbol,asset_type:p.asset_type})}
+async function prefillTrade(side:"BUY"|"SELL"="BUY"){if(!selected.value)return;orderType.value='MARKET';orderQuantity.value=Number(aiResult.value?.decision_center?.position_sizing?.quantity)||1;await showPaper();ElMessage.info(`已带入 ${selected.value.symbol} ${side==='BUY'?'买入':'卖出'}信息，请确认后再下单`)}
 async function showWatchlist() {
   page.value = "watchlist";
   await loadWatchlist();
@@ -465,15 +489,22 @@ async function checkUpdates() {
     updateChecking.value = false;
   }
 }
+function refreshPage(){
+  if(page.value==='home')void loadHome();else if(page.value==='news')void loadNews();else if(page.value==='paper')void loadPaper();
+  else if(page.value==='detail')void Promise.all([loadQuote(),loadKline()]);else if(page.value==='prediction'){void Promise.all([loadQuote(),loadKline()]);if(aiResult.value)void runAI()}
+  else if(page.value==='strategy')void loadKline();else if(page.value==='watchlist')void loadWatchlist();
+}
 function nav(
   target:
     "home" | "market" | "ai" | "backtest" | "news" | "paper" | "watchlist" | "settings",
+  updateUrl=true,
 ) {
+  const paths:any={home:'/',market:'/market',ai:'/prediction',backtest:'/strategy',news:'/news',paper:'/paper',watchlist:'/watchlist',settings:'/settings'};if(updateUrl)history.pushState({},"",paths[target]||'/');
   if (target === "home") {
     page.value = "home";
     loadHome();
   } else if (target === "market") {
-    page.value = "home";
+    page.value = "market";
     nextTick(() =>
       document.querySelector<HTMLInputElement>(".search input")?.focus(),
     );
@@ -481,12 +512,13 @@ function nav(
   else if (target === "news") showNews();
   else if (target === "watchlist") showWatchlist();
   else if (target === "settings") page.value = "settings";
-  else
-    openAsset({ symbol: "BTC", name: "比特币", asset_type: "crypto" }, target);
+  else if(target==='ai'){page.value='prediction';if(!selected.value)selected.value={symbol:'BTC',name:'比特币',asset_type:'crypto'};interval.value=selected.value.asset_type==='crypto'?'1h':'1d';void Promise.all([loadQuote(),loadKline()])}
+  else if(target==='backtest'){page.value='strategy';if(!selected.value)selected.value={symbol:'BTC',name:'比特币',asset_type:'crypto'};interval.value=selected.value.asset_type==='crypto'?'1h':'1d';void loadKline()}
 }
 const removeRealtimeListener=realtimeMarketStore.onEvent(handleRealtime);
-onMounted(()=>{loadHome();realtimeMarketStore.connect()});
-onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
+function restoreRoute(){const match=location.pathname.match(/^\/(stock|crypto)\/([^/]+)/);if(match){void openAsset({symbol:decodeURIComponent(match[2]),name:decodeURIComponent(match[2]),asset_type:match[1]==='crypto'?'crypto':'stock'},undefined,false);return}const route:Record<string,any>={'/':'home','/market':'market','/prediction':'ai','/strategy':'backtest','/news':'news','/paper':'paper','/watchlist':'watchlist','/settings':'settings'};nav(route[location.pathname]||'home',false)}
+onMounted(()=>{realtimeMarketStore.connect();restoreRoute();window.addEventListener('popstate',restoreRoute)});
+onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close();if(paperTimer)window.clearInterval(paperTimer);window.removeEventListener('popstate',restoreRoute)});
 </script>
 
 <template>
@@ -502,16 +534,16 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
         <button :class="{ active: page === 'home' }" @click="nav('home')">
           <el-icon><HomeFilled /></el-icon>首页
         </button>
-        <button @click="nav('market')">
+        <button :class="{ active: page === 'market' }" @click="nav('market')">
           <el-icon><TrendCharts /></el-icon>行情搜索
         </button>
-        <button @click="nav('ai')">
+        <button :class="{ active: page === 'prediction' }" @click="nav('ai')">
           <el-icon><DataAnalysis /></el-icon>AI 预测
         </button>
         <button :class="{ active: page === 'news' }" @click="nav('news')">
           <el-icon><Bell /></el-icon>新闻情报
         </button>
-        <button @click="nav('backtest')">
+        <button :class="{ active: page === 'strategy' }" @click="nav('backtest')">
           <el-icon><Wallet /></el-icon>回测
         </button>
         <button :class="{ active: page === 'paper' }" @click="nav('paper')">
@@ -546,6 +578,12 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
                   : "资产详情"
                 : page === "paper"
                   ? "模拟交易账户"
+                  : page === "market"
+                    ? "行情搜索终端"
+                  : page === "prediction"
+                    ? "AI预测中心"
+                  : page === "strategy"
+                    ? "策略研究与回测"
                   : page === "news"
                     ? "AI Market Intelligence"
                   : page === "watchlist"
@@ -572,17 +610,7 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
         <button
           v-if="page !== 'settings'"
           class="refresh"
-          @click="
-            page === 'home'
-              ? loadHome()
-              : page === 'news'
-                ? loadNews()
-              : page === 'paper'
-                ? loadPaper()
-                : page === 'detail'
-                  ? (loadQuote(), loadKline())
-                  : loadWatchlist()
-          "
+          @click="refreshPage"
         >
           <el-icon :class="{ spin: loading || detailLoading || paperLoading }"
             ><Refresh /></el-icon
@@ -590,7 +618,7 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
         </button>
       </header>
 
-      <div class="search">
+      <div v-if="['market','detail','prediction','strategy','paper'].includes(page)" class="search">
         <el-icon><Search /></el-icon
         ><input
           v-model="query"
@@ -606,7 +634,7 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
             ><button
               v-for="asset in searchResults"
               :key="asset.asset_type + asset.symbol"
-              @click="openAsset(asset)"
+              @click="selectSearchAsset(asset)"
             >
               <span>{{
                 asset.asset_type === "crypto" ? asset.pair : asset.name
@@ -760,6 +788,33 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
         </section></template
       >
 
+      <template v-else-if="page === 'market'">
+        <section class="market-workspace">
+          <div class="panel market-guide"><span class="eyebrow">FIND & ANALYZE</span><h2>找股票 / 看股票</h2><p>在上方输入贵州茅台、600519、NVDA、TSLA、BTC。搜索结果来自东方财富、Yahoo Finance 或 OKX，选择后进入对应 symbol 的独立详情终端。</p></div>
+          <section class="panel"><h3>可用市场入口</h3><div class="market-directory"><button @click="query='600519';searchAssets()">A股 · 600519</button><button @click="query='NVDA';searchAssets()">美股 · NVDA</button><button @click="query='TSLA';searchAssets()">美股 · TSLA</button><button @click="query='BTC';searchAssets()">Crypto · BTC</button></div></section>
+          <section class="panel"><h3>行情终端包含</h3><div class="feature-strip"><div><b>实时价格</b><span>Ticker 与成交量</span></div><div><b>实时K线</b><span>当前蜡烛逐Tick更新</span></div><div><b>技术指标</b><span>MA/MACD/RSI/BOS/FVG</span></div><div><b>决策工具</b><span>新闻、AI预测、策略、模拟交易</span></div></div></section>
+        </section>
+      </template>
+
+      <template v-else-if="page === 'prediction'">
+        <section class="panel prediction-workspace">
+          <div class="panel-top"><div><span class="eyebrow">PREDICTION CENTER</span><h2>{{ selected ? `${selected.name} ${selected.symbol}` : '请搜索标的' }}</h2><p>模型仅使用截至数据截止时间的真实K线、指标与外部上下文。</p></div><button class="primary" @click="runAI()" :disabled="aiLoading||!selected">{{ aiLoading?'正在训练与验证…':aiResult?'重新预测':'开始预测' }}</button></div>
+          <el-alert v-if="aiError" :title="`AI预测暂时不可用：${aiError}`" type="warning" show-icon :closable="false"><button @click="runAI()">重新预测</button></el-alert>
+          <div v-if="aiLoading" class="loading-box">正在获取最新行情、新闻、市场环境并执行严格时间验证…</div>
+          <template v-else-if="aiResult"><div class="prediction-meta"><span>预测生成：{{ aiResult.predicted_at?.replace('T',' ').slice(0,19) || aiResult.realtime?.generated_at?.replace('T',' ').slice(0,19) }}</span><span>数据截止：{{ aiResult.data_time?.replace('T',' ').slice(0,19) }}</span><span>数据源：{{ aiResult.data_source }}</span></div>
+            <div class="prediction-grid"><article v-for="p in predictionRows" :key="p.horizon" class="prediction-card"><h3>{{ p.horizon }}</h3><template v-if="p.prediction"><b>{{ p.prediction }}</b><p title="基于当前模型输入条件，对指定周期方向的统计概率估计，不保证收益。">上涨 {{ probability(p.probabilities.up) }} · 震荡 {{ probability(p.probabilities.flat) }} · 下跌 {{ probability(p.probabilities.down) }}</p><span title="表示模型在当前数据条件下对结果稳定程度的估计。">置信度 {{ p.confidence_score }}/100 · {{ p.confidence }}</span><small>Walk-forward {{ p.walk_forward_samples }} 个样本 · {{ p.status }}</small></template><template v-else><b>数据不足</b><p>{{ p.message }}</p></template></article></div>
+            <section class="prediction-evidence"><h3 title="综合技术趋势、成交量、新闻、市场环境与历史统计。">预测依据 / AI评分</h3><p>策略一致性 {{ aiResult.decision_center?.technical_strategy?.confluence?.score ?? '—' }} · 数据质量 {{ aiResult.decision_center?.technical_strategy?.data_quality?.score ?? '—' }} · 市场环境 {{ aiResult.decision_center?.market_regime?.primary || '—' }}</p><p class="data-warning">预测概率是样本外统计估计，不是收益保证；样本不足的周期不会强行生成。</p></section>
+          </template><div v-else class="empty">搜索并选择标的，然后点击“开始预测”。不会自动展示旧结果。</div>
+        </section>
+      </template>
+
+      <template v-else-if="page === 'strategy'">
+        <section class="panel strategy-workspace"><div class="panel-top"><div><span class="eyebrow">STRATEGY LAB</span><h2>{{ selected ? `${selected.symbol} 策略研究` : '请选择标的' }}</h2><p>配置策略并对真实历史K线执行含手续费、滑点的回测。</p></div><div><button class="primary" @click="runBacktest" :disabled="backtestLoading||!selected">{{ backtestLoading?'回测中…':'开始回测' }}</button> <button v-if="backtestResult" @click="prefillTrade('BUY')">模拟执行</button></div></div>
+          <div class="strategy-controls"><select v-model="strategy"><option value="ma">MA 金叉/死叉</option><option value="macd">MACD</option><option value="rsi">RSI</option><option value="breakout">突破</option><option value="fibonacci">Fibonacci</option><option value="bos">BOS</option><option value="fvg">FVG</option><option value="fib_fvg_bos">Fib+FVG+BOS</option></select><select v-model="interval"><option value="1d">1D</option><option value="4h">4H</option><option value="1h">1H</option><option value="15m">15M</option></select><label>初始资金 <input v-model.number="initialCash" type="number" /></label></div>
+          <div v-if="backtestResult" class="backtest-metrics"><div><span>最终资金</span><b>{{ backtestResult.final_cash }}</b></div><div><span>收益率</span><b>{{ backtestResult.return_percent }}%</b></div><div><span>最大回撤</span><b>{{ backtestResult.max_drawdown_percent }}%</b></div><div><span>胜率</span><b>{{ backtestResult.win_rate_percent }}%</b></div><div><span>交易次数</span><b>{{ backtestResult.trade_count }}</b></div></div><EquityChart v-if="backtestResult" :curve="backtestResult.equity_curve"/><div v-else class="empty">策略页面只负责策略选择、参数与历史回测，不再打开固定 BTC 详情页。</div>
+        </section>
+      </template>
+
       <template v-else-if="page === 'news'">
         <el-alert v-if="newsError" :title="newsError" type="error" show-icon :closable="false">
           <button @click="loadNews()">重试</button>
@@ -806,7 +861,7 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
               <div><h3 :class="newsClass(item)">{{ item.event.direction }} · {{ item.title }}</h3><p>{{ item.summary }}</p><small>{{ item.published_at?.replace('T',' ').slice(0,19) || '发布时间未知（禁止进入回测）' }} · {{ item.source }} · {{ item.market }} · {{ item.category }}</small>
                 <div class="news-tags"><span v-for="symbol in item.symbols" :key="symbol">{{ symbol }}</span><span v-for="sector in item.sectors" :key="sector">{{ sector }}</span><em>{{ stars(item.impact.score) }} {{ item.impact.level }}</em><em>分析：{{ item.analysis_status }}</em><em v-if="item.related_source_count>1">相关新闻 {{ item.related_source_count }} 条</em></div>
                 <p><b>为什么{{ item.event.direction }}：</b>{{ item.reason.join('；') }}</p>
-                <button @click.stop="openNews(item)">查看完整影响</button> <a @click.stop :href="item.url" target="_blank">查看原文</a>
+              <button @click.stop="openNews(item)">AI深度分析</button> <a @click.stop :href="item.url" target="_blank">查看原文</a>
               </div>
             </article></div>
             <button v-if="newsIntelligence.has_more" class="load-more" @click="loadMoreNews">加载更多</button>
@@ -827,7 +882,7 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
         <section v-if="selected" class="detail-head">
           <div>
             <span class="eyebrow">{{
-              selected.asset_type === "crypto" ? "CRYPTO" : "A-SHARE"
+              selected.asset_type === "crypto" ? "CRYPTO" : /^[A-Za-z]/.test(selected.symbol) ? "US EQUITY" : "A-SHARE"
             }}</span>
             <h2>
               {{ selected.name }}
@@ -899,6 +954,7 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
               >
                 {{ p.toUpperCase() }}
               </button>
+              <button class="buy" @click="prefillTrade('BUY')">买入</button><button class="sell" @click="prefillTrade('SELL')">卖出</button>
             </div>
           </div>
           <div v-if="detailLoading" class="loading-box">
@@ -936,10 +992,10 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
               >
             </div>
             <div>
-              <span>MACD</span><b>{{ indicators.latest.macd?.toFixed(4) }}</b>
+              <span title="MACD用于观察趋势方向、动能及其变化。">MACD ⓘ</span><b>{{ indicators.latest.macd?.toFixed(4) }}</b>
             </div>
             <div>
-              <span>RSI(14)</span><b>{{ indicators.latest.rsi?.toFixed(2) }}</b>
+              <span title="RSI衡量近期上涨与下跌的相对强弱，通常用于识别超买或超卖。">RSI(14) ⓘ</span><b>{{ indicators.latest.rsi?.toFixed(2) }}</b>
             </div>
             <div>
               <span>K / D / J</span
@@ -1108,9 +1164,9 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
                     </details>
                   </div>
                   <div class="structure-summary">
-                    <article><span>市场结构</span><b>{{ aiResult.decision_center.technical_strategy.structure.trend }}</b><small>BOS {{ aiResult.decision_center.technical_strategy.structure.latest_bos?.direction || 'NONE' }} · CHoCH {{ aiResult.decision_center.technical_strategy.structure.latest_choch?.direction || 'NONE' }}</small></article>
+                    <article title="BOS是价格突破已有结构；CHoCH表示市场结构可能转向。"><span>市场结构 ⓘ</span><b>{{ aiResult.decision_center.technical_strategy.structure.trend }}</b><small>BOS {{ aiResult.decision_center.technical_strategy.structure.latest_bos?.direction || 'NONE' }} · CHoCH {{ aiResult.decision_center.technical_strategy.structure.latest_choch?.direction || 'NONE' }}</small></article>
                     <article><span>Fibonacci</span><b>{{ aiResult.decision_center.technical_strategy.fibonacci.status }}</b><small>{{ aiResult.decision_center.technical_strategy.fibonacci.direction || '—' }} · available_at {{ aiResult.decision_center.technical_strategy.fibonacci.available_at?.replace('T',' ').slice(0,19) || '—' }}</small></article>
-                    <article><span>FVG</span><b>{{ aiResult.decision_center.technical_strategy.fvgs.filter((x:any)=>x.status!=='FILLED').length }} Open</b><small>只绘制三K线真实缺口</small></article>
+                    <article title="FVG（Fair Value Gap）是价格快速移动形成的三K线非平衡区域。"><span>FVG ⓘ</span><b>{{ aiResult.decision_center.technical_strategy.fvgs.filter((x:any)=>x.status!=='FILLED').length }} Open</b><small>只绘制三K线真实缺口</small></article>
                     <article><span>动态风险</span><b>EV {{ aiResult.decision_center.technical_strategy.risk_plan.expected_value }}</b><small>样本 {{ aiResult.decision_center.technical_strategy.risk_plan.historical_samples }} · SL {{ aiResult.decision_center.technical_strategy.risk_plan.stop_loss }}</small></article>
                   </div>
                   <details><summary>多空与中性证据链</summary><div class="evidence-columns"><div><h4>看多</h4><p v-for="(e,i) in aiResult.decision_center.technical_strategy.evidence_chain.bullish" :key="`b${i}`">+ {{ e.name }} · {{ e.value }}</p></div><div><h4>看空</h4><p v-for="(e,i) in aiResult.decision_center.technical_strategy.evidence_chain.bearish" :key="`s${i}`">- {{ e.name }} · {{ e.value }}</p></div><div><h4>中性/缺数据</h4><p v-for="(e,i) in aiResult.decision_center.technical_strategy.evidence_chain.neutral" :key="`n${i}`">{{ strategyLabel(e.name) }} · {{ e.value }}</p></div></div></details>
@@ -1258,56 +1314,16 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
         </section></template
       >
 
-      <template v-else-if="page === 'paper'"
-        ><div v-if="paperLoading" class="loading-box">
-          正在按实时行情计算账户…
-        </div>
-        <div class="account-grid">
-          <div
-            v-for="a in paperAccounts"
-            :key="a.currency"
-            class="account-card"
-          >
-            <span>{{ a.currency }} 模拟账户</span
-            ><b>{{ price(a.total_equity, a.currency) }}</b
-            ><small
-              >可用 {{ price(a.cash, a.currency) }} · 收益
-              {{ a.return_percent }}%</small
-            >
-          </div>
-        </div>
-        <section class="panel">
-          <h3>实时持仓</h3>
-          <div v-if="!positions.length" class="empty">
-            暂无持仓，可从任意资产详情页模拟买入。
-          </div>
-          <div
-            v-for="p in positions"
-            :key="p.asset_type + p.symbol"
-            class="table-row"
-          >
-            <b>{{ p.symbol }}</b
-            ><span>数量 {{ p.quantity.toFixed(6) }}</span
-            ><span>成本 {{ p.average_cost.toFixed(2) }}</span
-            ><span>现价 {{ p.current_price ?? "行情不可用" }}</span
-            ><span :class="trendClass(p.return_percent)"
-              >浮盈 {{ p.unrealized_pnl ?? "—" }}（{{
-                p.return_percent ?? "—"
-              }}%）</span
-            ><button @click="sellAll(p)">全部卖出</button>
-          </div>
+      <template v-else-if="page === 'paper'">
+        <el-alert title="模拟交易，不涉及真实资金；所有成交仅写入本机数据库。" type="info" show-icon :closable="false" />
+        <div v-if="paperLoading" class="loading-box">正在按真实行情更新挂单、账户与持仓盈亏…</div>
+        <div class="account-grid"><div v-for="a in paperAccounts" :key="a.currency" class="account-card"><span>{{ a.currency }} 模拟账户 · 总资产</span><b>{{ price(a.total_equity,a.currency) }}</b><small>可用 {{ price(a.available_cash,a.currency) }} · 冻结 {{ price(a.frozen_cash,a.currency) }} · 持仓 {{ price(a.position_market_value,a.currency) }}</small><small :class="trendClass(a.today_pnl)">今日盈亏 {{ price(a.today_pnl,a.currency) }}</small><small :class="trendClass(a.cumulative_pnl)">累计盈亏 {{ price(a.cumulative_pnl,a.currency) }} · 收益 {{ a.return_percent }}%</small></div></div>
+        <section class="paper-layout">
+          <div class="panel order-ticket"><div class="panel-top"><h3>下单面板</h3><span class="realtime-status"><i></i>{{ realtimeMarketStore.connectionStatus.value }}</span></div><p>在顶部搜索并选择股票或币种，新闻/AI/策略页也可带入标的。</p><div class="selected-order-asset"><b>{{ selected?.name || '尚未选择标的' }}</b><span>{{ selected?.symbol || '—' }} · {{ quote?.price || selectedLiveState.quote?.price || '等待实时价' }}</span></div><label>订单类型<select v-model="orderType"><option value="MARKET">市价</option><option value="LIMIT">限价</option></select></label><label>数量<input v-model.number="orderQuantity" type="number" min="0.000001" step="any" /></label><label v-if="orderType==='LIMIT'">限价<input v-model.number="orderLimitPrice" type="number" min="0.000001" step="any" /></label><div class="order-actions"><button class="buy" @click="submitPaperOrder('BUY')" :disabled="orderLoading||!selected">确认买入</button><button class="sell" @click="submitPaperOrder('SELL')" :disabled="orderLoading||!selected">确认卖出</button></div><p class="data-warning">市价单按当前真实报价成交；限价买 ≤ 限价、限价卖 ≥ 限价时成交。系统不会自动替你确认下单。</p></div>
+          <div class="panel"><div class="panel-top"><h3>实时持仓</h3><button @click="resetPaper">重置模拟账户</button></div><div v-if="!positions.length" class="empty">暂无持仓。请搜索标的并在左侧下单。</div><div v-for="p in positions" :key="p.asset_type+p.symbol" class="position-row"><button class="link-button" @click="openPosition(p)">{{ p.symbol }}</button><span>持仓 {{ p.quantity.toFixed(6) }}</span><span>可卖 {{ (p.quantity-(p.frozen_quantity||0)).toFixed(6) }}</span><span>成本 {{ p.average_cost.toFixed(2) }}</span><span>现价 {{ p.current_price??'行情不可用' }}</span><b :class="trendClass(p.unrealized_pnl)">{{ p.unrealized_pnl??'—' }}（{{ p.return_percent??'—' }}%）</b><button @click="sellAll(p)">全部卖出</button></div></div>
         </section>
-        <section class="panel">
-          <h3>模拟订单记录</h3>
-          <div v-for="o in orders" :key="o.id" class="table-row order">
-            <span>#{{ o.id }}</span
-            ><b>{{ o.symbol }} {{ o.side }}</b
-            ><span>{{ o.quantity.toFixed(6) }} × {{ o.price }}</span
-            ><span>手续费 {{ o.fee.toFixed(4) }}</span
-            ><small>{{ o.created_at }}</small>
-          </div>
-        </section></template
-      >
+        <section class="panel"><h3>我的订单</h3><div class="paper-order-head"><span>时间</span><span>标的</span><span>方向/类型</span><span>数量 × 价格</span><span>状态</span><span>操作</span></div><div v-for="o in orders" :key="o.id" class="paper-order-row"><small>{{ o.created_at }}</small><b>{{ o.symbol }}</b><span>{{ o.side }} / {{ o.order_type }}</span><span>{{ o.quantity.toFixed(6) }} × {{ o.limit_price||o.price }}</span><strong :class="o.status==='filled'?'positive':o.status==='cancelled'?'negative':'neutral'">{{ o.status }}</strong><button v-if="o.status==='pending'" @click="cancelOrder(o.id)">撤单</button><span v-else>手续费 {{ o.fee.toFixed(4) }}</span></div><div v-if="!orders.length" class="empty">暂无订单记录。</div></section>
+      </template>
 
       <template v-else-if="page === 'watchlist'"
         ><section class="panel">
@@ -1368,15 +1384,17 @@ onBeforeUnmount(()=>{removeRealtimeListener();realtimeMarketStore.close()});
       >
       <el-dialog v-model="newsDialogOpen" title="新闻事件详情" width="760px" append-to-body>
         <div v-if="newsSelected" class="news-detail-dialog">
-          <h2 :class="newsClass(newsSelected)">{{ newsSelected.event.direction }} · {{ newsSelected.title }}</h2>
+          <span class="eyebrow">已发生 · 新闻事实</span><h2>{{ newsSelected.title }}</h2>
           <p>{{ newsSelected.summary }}</p><small>{{ newsSelected.published_at?.replace('T',' ').slice(0,19) }} · {{ newsSelected.source }} · {{ newsSelected.market }}</small>
+          <h3 class="analysis-divider">AI判断 <span :class="newsClass(newsSelected)">{{ newsSelected.event.direction }}</span></h3>
           <div class="impact-banner"><b>Impact {{ newsSelected.impact.score }}/100</b><span>{{ stars(newsSelected.impact.score) }} · 可信度 {{ Math.round(newsSelected.event.confidence*100) }}%</span></div>
           <h3>为什么这样判断</h3><ol><li v-for="reason in newsSelected.reason" :key="reason">{{ reason }}</li></ol>
           <div class="two-col"><div><h3>直接影响</h3><p v-for="x in newsSelected.impact.primary" :key="x.target"><b>{{ x.target }} · {{ x.direction }}</b><br>{{ x.reason }}</p><p v-if="!newsSelected.impact.primary.length">未识别到可验证的直接标的，不强行关联。</p></div><div><h3>行业 / 间接影响</h3><p v-for="x in newsSelected.impact.secondary" :key="x.target"><b>{{ x.target }} · {{ x.direction }}</b><br>{{ x.reason }}</p></div></div>
           <h3>潜在反向影响 / 风险</h3><p v-for="x in newsSelected.impact.counter" :key="x.target"><b>{{ x.target }}</b>：{{ x.reason }}</p><p v-if="!newsSelected.impact.counter.length">规则引擎未识别到明确反向影响。</p>
           <template v-if="newsSelected.historical_outcome"><h3>新闻发布后真实市场表现</h3><div class="backtest-metrics"><div v-for="(value,key) in newsSelected.historical_outcome.returns" :key="key"><span>{{ key }}</span><b :class="trendClass(value as number)">{{ probability(value as number) }}</b></div></div><p>回测入场：{{ newsSelected.historical_outcome.entry_time }} · {{ newsSelected.historical_outcome.entry_price }}</p></template>
           <p v-else class="data-warning">该新闻尚未与足够的后续真实价格完成对齐，不展示虚构收益。</p>
-          <a :href="newsSelected.url" target="_blank">查看原文</a>
+          <h3 class="analysis-divider">市场预测</h3><div class="prediction-grid"><article v-for="(p,h) in newsSelected.market_prediction" :key="h"><b>{{ h }}</b><p title="未校准证据估计，不是保证收益。">上涨 {{ p.up }}% · 震荡 {{ p.flat }}% · 下跌 {{ p.down }}%</p><small>{{ p.validated_samples }} 个已验证样本 · {{ p.type }}</small></article></div><p class="data-warning">预测依据：新闻影响 {{ newsSelected.prediction_basis?.news_impact ?? '—' }} · 技术评分 {{ newsSelected.prediction_basis?.technical_score ?? '暂无' }} · 量能 {{ newsSelected.prediction_basis?.volume_ratio ?? '暂无' }} · 综合 {{ newsSelected.prediction_basis?.composite_evidence_score ?? '—' }}。{{ newsSelected.prediction_basis?.notice }}</p>
+          <div class="dialog-actions"><button v-for="symbol in newsSelected.symbols" :key="symbol" @click="openNewsSymbol(symbol)">查看 {{ symbol }}</button><button v-if="newsSelected.symbols?.length" @click="tradeNewsSymbol(newsSelected.symbols[0])">模拟交易</button><a :href="newsSelected.url" target="_blank">查看原文</a></div>
         </div>
       </el-dialog>
       <footer>

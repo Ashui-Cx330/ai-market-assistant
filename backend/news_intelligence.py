@@ -191,6 +191,15 @@ def prediction_horizons(composite,sample_count):
 def build_intelligence(items,symbol=None,name=None,technical_score=None,volume_ratio=None,sample_count=0):
     analyzed=[EventExtractionEngine().analyze(x,symbol,name) for x in items if _valid(str(x.get("title") or ""))];analyzed.sort(key=lambda x:(x["impact"]["score"],x.get("published_at") or ""),reverse=True);scores=[x["sentiment"]["score"] for x in analyzed];market=round(sum(scores)/len(scores),1) if scores else 0;positive=sum(x>=10 for x in scores);negative=sum(x<=-10 for x in scores);sectors={}
     for item in analyzed:
+        # Each card gets its own event-conditioned estimate.  Never reuse the
+        # aggregate market forecast as if it belonged to every headline.
+        item_decision=TradingDecisionEngine().decide(item["sentiment"]["score"],technical_score,volume_ratio,0)
+        item["market_prediction"]=prediction_horizons(item_decision["composite_evidence_score"],0)
+        item["prediction_basis"]={"news_impact":item["sentiment"]["score"],"technical_score":technical_score,
+                                  "volume_ratio":volume_ratio,"composite_evidence_score":item_decision["composite_evidence_score"],
+                                  "historical_similar_samples":0,
+                                  "notice":"尚未积累可比事件样本；当前为未校准证据估计，不是历史胜率。"}
+    for item in analyzed:
         for sector in item["sectors"]:
             b=sectors.setdefault(sector,{"positive":0,"negative":0,"neutral":0,"score":0});key="positive" if item["sentiment"]["score"]>=10 else "negative" if item["sentiment"]["score"]<=-10 else "neutral";b[key]+=1;b["score"]+=item["sentiment"]["score"]
     decision=TradingDecisionEngine().decide(market,technical_score,volume_ratio,sample_count)
