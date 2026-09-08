@@ -18,6 +18,7 @@ function Set-JsonVersion([string]$Path, [int]$Count = 1) {
 
 Set-JsonVersion (Join-Path $root 'version.json')
 Set-JsonVersion (Join-Path $root 'frontend\package.json')
+Set-JsonVersion (Join-Path $root 'frontend\package-lock.json') 2
 Set-JsonVersion (Join-Path $root 'desktop\package.json')
 Set-JsonVersion (Join-Path $root 'desktop\package-lock.json') 2
 Write-Output "Versions synchronized to $Version"

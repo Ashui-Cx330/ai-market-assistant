@@ -189,6 +189,11 @@ def _aggregate(candles: list[dict], rule: str) -> list[dict]:
 
 async def stock_kline(symbol: str, interval: str, limit: int = 400, force_refresh: bool = False) -> tuple[list[dict], str]:
     symbol=normalize_stock_symbol(symbol)
+    if interval == "1w":
+        daily, source = await stock_kline(symbol, "1d", min(5000, max(400, limit * 7)), force_refresh)
+        weekly=_aggregate(daily, "W-FRI")[-limit:]
+        if weekly: weekly[-1]["timestamp"]=daily[-1]["timestamp"]
+        return weekly, f"{source} · weekly aggregation"
     if _us_stock(symbol):
         if interval not in YAHOO_INTERVALS:raise ValueError("美股支持 1m/5m/15m/30m/1h/4h/1d")
         key=f"stock-kline:{symbol}:{interval}:{limit}"
@@ -258,6 +263,11 @@ async def stock_kline(symbol: str, interval: str, limit: int = 400, force_refres
 
 async def crypto_kline(symbol: str, interval: str, limit: int = 400, force_refresh: bool = False) -> tuple[list[dict],str]:
     symbol=normalize_crypto(symbol)
+    if interval == "1w":
+        daily, source = await crypto_kline(symbol, "1d", min(5000, max(400, limit * 7)), force_refresh)
+        weekly=_aggregate(daily, "1W")[-limit:]
+        if weekly: weekly[-1]["timestamp"]=daily[-1]["timestamp"]
+        return weekly, f"{source} · weekly aggregation"
     if interval not in INTERVALS: raise ValueError("币种支持 1m/5m/15m/30m/1h/4h/1d")
     key=f"crypto-kline:{symbol}:{interval}:{limit}"
     if not force_refresh:

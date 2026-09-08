@@ -38,6 +38,7 @@ from .strategy_engine import (SIGNAL_KEYS, StrategyEngine, strategy_backtest,
                               optimize_strategy_parameters, ml_ict_incremental_experiment)
 from .realtime import realtime_manager, utc_now
 from .news_intelligence import build_intelligence, collect_historical_news, collect_news, event_backtest
+from .terminal_v19 import router as terminal_v19_router
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))["version"]
@@ -56,6 +57,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="AI行情助手", version=VERSION, docs_url="/api/docs", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
                    allow_methods=["*"], allow_headers=["*"])
+app.include_router(terminal_v19_router)
 
 
 def ok(data=None, message="成功", source=None) -> dict:
@@ -154,7 +156,7 @@ def health() -> dict:
     with connection() as conn:
         conn.execute("SELECT 1").fetchone()
     frontend_ready = (DIST / "index.html").exists()
-    return {"status": "ok", "service": "AI行情助手", "phase": "V7 实时K线与新闻情报", "version": VERSION,
+    return {"status": "ok", "service": "AI行情助手", "phase": "v1.9 专业AI金融终端", "version": VERSION,
             "desktop": os.environ.get("TRADING_AI_DESKTOP") == "1", "database": "ok",
             "database_path": str(DB_PATH), "frontend": "ok" if frontend_ready else "missing"}
 

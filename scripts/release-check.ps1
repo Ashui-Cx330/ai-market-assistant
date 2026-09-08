@@ -7,6 +7,12 @@ $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $productName = 'AI' + [char]0x884C + [char]0x60C5 + [char]0x52A9 + [char]0x624B
 function Read-Utf8Json([string]$Path) { return [IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8) | ConvertFrom-Json }
+function Read-LockVersion([string]$Path) {
+  $text = [IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8)
+  $match = [Text.RegularExpressions.Regex]::Match($text, '"version"\s*:\s*"([^"]+)"')
+  if (-not $match.Success) { throw "No version in lockfile: $Path" }
+  return $match.Groups[1].Value
+}
 if (-not $Version) { $Version = (Read-Utf8Json (Join-Path $root 'version.json')).version }
 $tag = "v$Version"
 $owner = $env:GH_OWNER
@@ -16,7 +22,9 @@ if (-not $owner -or -not $repo) { throw 'GH_OWNER and GH_REPO are required.' }
 $versions = @(
   (Read-Utf8Json (Join-Path $root 'version.json')).version,
   (Read-Utf8Json (Join-Path $root 'desktop\package.json')).version,
-  (Read-Utf8Json (Join-Path $root 'frontend\package.json')).version
+  (Read-Utf8Json (Join-Path $root 'frontend\package.json')).version,
+  (Read-LockVersion (Join-Path $root 'desktop\package-lock.json')),
+  (Read-LockVersion (Join-Path $root 'frontend\package-lock.json'))
 )
 if (@($versions | Where-Object { $_ -ne $Version }).Count -gt 0) { throw "Version mismatch: $($versions -join ', ')" }
 

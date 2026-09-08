@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pandas as pd
 
 from .ai_engine import out_of_sample_probabilities
 from .indicators import calculate_indicators
@@ -24,7 +25,8 @@ def run_backtest(candles: list[dict], strategy: str, initial_cash: float, fee_ra
         elif strategy=="ai_technical":active=bool(row.get("ai_up",np.nan)>.55 and row.get("macd",0)>row.get("macd_signal",0) and row["close"]>row.get("ma20",math.inf)) if not np.isnan(row.get("ai_up",np.nan)) else None
         else:raise ValueError("未知策略")
         signals.append(active)
-    cash=float(initial_cash);quantity=0.0;entry_cost=0.0;trades=[];curve=[];peak=initial_cash;max_drawdown=0.0
+    cash=float(initial_cash);quantity=0.0;entry_cost=0.0;trades=[];curve=[];drawdown_curve=[];peak=initial_cash;max_drawdown=0.0
+    benchmark_curve=[];benchmark_start=float(df.iloc[0]["close"])
     # Indicators and model probabilities at bar T can only be acted on at bar
     # T+1. Prefer next-bar open so the backtest cannot trade on its own close.
     executable_signals=[None]+signals[:-1]
@@ -38,8 +40,10 @@ def run_backtest(candles: list[dict], strategy: str, initial_cash: float, fee_ra
             price=float(row["open"])*(1-slippage_rate)
             gross=quantity*price;fee=gross*fee_rate;cash+=gross-fee;pnl=(gross-fee)-entry_cost
             trades.append({"side":"SELL","timestamp":row["timestamp"],"price":price,"quantity":quantity,"fee":fee,"pnl":pnl});quantity=0;entry_cost=0
-        equity=cash+quantity*mark_price;peak=max(peak,equity);max_drawdown=max(max_drawdown,(peak-equity)/peak if peak else 0)
+        equity=cash+quantity*mark_price;peak=max(peak,equity);drawdown=(peak-equity)/peak if peak else 0;max_drawdown=max(max_drawdown,drawdown)
         curve.append({"timestamp":row["timestamp"],"equity":round(equity,2)})
+        drawdown_curve.append({"timestamp":row["timestamp"],"drawdown":round(-drawdown*100,4)})
+        benchmark_curve.append({"timestamp":row["timestamp"],"equity":round(initial_cash*mark_price/benchmark_start,2)})
     if quantity>0:
         price=float(df.iloc[-1]["close"])*(1-slippage_rate);gross=quantity*price;fee=gross*fee_rate;cash+=gross-fee;pnl=(gross-fee)-entry_cost
         trades.append({"side":"SELL","timestamp":df.iloc[-1]["timestamp"],"price":price,"quantity":quantity,"fee":fee,"pnl":pnl});quantity=0
@@ -53,13 +57,20 @@ def run_backtest(candles: list[dict], strategy: str, initial_cash: float, fee_ra
     downside=returns[returns<0]
     sharpe=float(np.sqrt(periods)*returns.mean()/returns.std(ddof=1)) if len(returns)>1 and returns.std(ddof=1)>0 else 0.0
     sortino=float(np.sqrt(periods)*returns.mean()/downside.std(ddof=1)) if len(downside)>1 and downside.std(ddof=1)>0 else 0.0
+    elapsed_days=max(1,(pd.Timestamp(df.iloc[-1]["timestamp"])-pd.Timestamp(df.iloc[0]["timestamp"])).days)
+    years=max(elapsed_days/(365 if asset_type=="crypto" else 365.25),1/365.25)
+    annualized=((cash/initial_cash)**(1/years)-1)*100 if cash>0 else -100.0
+    benchmark_return=(float(df.iloc[-1]["close"])/benchmark_start-1)*100
     return {"strategy":strategy,"initial_cash":round(initial_cash,2),"final_cash":round(cash,2),
             "return_percent":round((cash/initial_cash-1)*100,2),"max_drawdown_percent":round(max_drawdown*100,2),
+            "net_return_percent":round((cash/initial_cash-1)*100,2),"annualized_return_percent":round(annualized,2),
+            "benchmark_return_percent":round(benchmark_return,2),"excess_return_percent":round((cash/initial_cash-1)*100-benchmark_return,2),
             "win_rate_percent":round(len(wins)/len(closed)*100,2) if closed else 0,"trade_count":len(closed),
             "winning_trades":len(wins),"losing_trades":len(losses),"profit_loss_ratio":round(gross_profit/gross_loss,2) if gross_loss else (None if not gross_profit else 999),
             "profit_factor":round(gross_profit/gross_loss,3) if gross_loss else (None if not gross_profit else 999),
             "sharpe_ratio":round(sharpe,3),"sortino_ratio":round(sortino,3),
             "fee_rate":fee_rate,"slippage_rate":slippage_rate,
-            "equity_curve":curve,"trades":trades,"data_start":df.iloc[0]["timestamp"],"data_end":df.iloc[-1]["timestamp"],
+            "equity_curve":curve,"benchmark_curve":benchmark_curve,"drawdown_curve":drawdown_curve,
+            "trades":trades,"data_start":df.iloc[0]["timestamp"],"data_end":df.iloc[-1]["timestamp"],
             "execution_timing":"signal at close T, execution at open T+1",
             "notice":"历史回测包含手续费和滑点，不代表未来收益。AI 策略只使用带隔离区的滚动样本外预测。"}

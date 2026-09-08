@@ -4,6 +4,15 @@ $productName = 'AI' + [char]0x884C + [char]0x60C5 + [char]0x52A9 + [char]0x624B
 $serviceName = $productName + [char]0x670D + [char]0x52A1
 Set-Location $root
 
+# GitHub release asset CDN can be unreachable on some mainland networks even
+# while the GitHub API works.  electron-builder verifies every tool archive
+# against its built-in SHA256, so this mirror changes transport only and a
+# tampered file is rejected before execution.  An explicit environment value
+# always takes precedence.
+if (-not $env:ELECTRON_BUILDER_BINARIES_MIRROR) {
+  $env:ELECTRON_BUILDER_BINARIES_MIRROR = 'https://npmmirror.com/mirrors/electron-builder-binaries/'
+}
+
 # electron-builder only emits fresh latest.yml when a publish provider exists.
 # Resolve it automatically so direct builds cannot accidentally leave metadata
 # from an older release in the output directory.

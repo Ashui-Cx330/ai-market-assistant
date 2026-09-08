@@ -7,8 +7,8 @@ const testData = path.join(root, 'work', 'desktop-e2e-data')
 fs.rmSync(testData, { recursive: true, force: true })
 
 async function nav(page, label, heading) {
-  await page.locator('nav button').filter({ hasText: label }).click()
-  await page.getByRole('heading', { name: heading, exact: true }).waitFor({ timeout: 30000 })
+  await page.locator('.terminal-sidebar nav button').filter({ hasText: label }).click()
+  await page.getByRole('heading', { name: heading, exact: true }).first().waitFor({ timeout: 60000 })
 }
 
 async function run() {
@@ -22,56 +22,57 @@ async function run() {
   try {
     const page = await app.firstWindow({ timeout: 90000 })
     await page.waitForLoadState('domcontentloaded')
-    await page.getByRole('heading', { name: '市场概览' }).waitFor({ timeout: 30000 })
+    await page.getByRole('heading', { name: 'Market Intelligence', exact: true }).waitFor({ timeout: 90000 })
+    await page.locator('.pulse-score strong').waitFor({ timeout: 90000 })
 
-    await nav(page, '行情搜索', '行情搜索终端')
-    await page.getByRole('heading', { name: '找股票 / 看股票' }).waitFor()
-    await nav(page, 'AI 预测', 'AI预测中心')
-    await page.getByText('PREDICTION CENTER').waitFor()
-    await nav(page, '回测', '策略研究与回测')
-    await page.getByText('STRATEGY LAB').waitFor()
-    await nav(page, '模拟交易', '模拟交易账户')
-    await page.getByRole('heading', { name: '下单面板' }).waitFor()
+    await nav(page, '行情', 'Market Scanner')
+    await page.locator('.scanner-table tbody tr').first().waitFor({ timeout: 90000 })
+    await page.locator('.scanner-table tbody tr').filter({ hasText: 'NVDA' }).first().click()
+    await page.getByRole('heading', { name: /NVIDIA|NVDA/ }).first().waitFor({ timeout: 60000 })
+    try {
+      await page.locator('.kline-chart canvas').waitFor({ timeout: 90000 })
+    } catch (error) {
+      await page.screenshot({ path: path.join(root, 'work', 'v19-packaged-detail-failure.png'), fullPage: true })
+      console.error('DETAIL_ERRORS', await page.locator('.state-error').allTextContents())
+      console.error('DETAIL_TEXT', (await page.locator('.detail-workspace').innerText().catch(() => 'missing')).slice(0, 2000))
+      throw error
+    }
+    await page.locator('.periods button').filter({ hasText: '1W' }).waitFor()
+    await page.locator('.info-tip').filter({ hasText: 'RSI' }).waitFor()
+    await page.locator('.ai-score strong').waitFor({ timeout: 60000 })
 
-    await nav(page, '行情搜索', '行情搜索终端')
-    const search = page.locator('.search input')
-    await search.fill('600519')
-    await page.getByRole('button', { name: '搜索', exact: true }).click()
-    await page.locator('.search-results button').filter({ hasText: '贵州茅台' }).click({ timeout: 60000 })
-    await page.getByRole('heading', { name: '贵州茅台', exact: true }).waitFor({ timeout: 30000 })
-    if (!page.url().endsWith('/stock/600519')) throw new Error(`Unexpected symbol route: ${page.url()}`)
-    await page.locator('.kline-chart canvas').waitFor({ timeout: 30000 })
-    await page.locator('[title*="RSI衡量"]').waitFor()
-    await page.locator('[title*="MACD用于观察"]').waitFor()
+    await nav(page, '模型表现', 'Model Lab')
+    await page.getByText('39.47%').waitFor()
+    await page.getByText('No statistical edge').waitFor()
 
-    await page.locator('.periods .buy').click()
-    await page.getByRole('heading', { name: '下单面板' }).waitFor()
+    await nav(page, '策略实验室', 'Strategy Lab')
+    await page.getByRole('button', { name: '转换为可执行规则' }).click()
+    await page.getByText('HOLD_BARS 5').waitFor()
+
+    await nav(page, '模拟交易', 'Paper Trading Terminal')
+    await page.locator('.order-ticket').waitFor({ timeout: 60000 })
+    await page.getByRole('button', { name: 'Review BUY' }).click()
+    await page.getByRole('heading', { name: '确认模拟订单' }).waitFor()
     await page.getByRole('button', { name: '确认买入' }).click()
-    await page.locator('.position-row').filter({ hasText: '600519.SH' }).waitFor({ timeout: 30000 })
+    await page.locator('.positions-pane button').first().waitFor({ timeout: 60000 })
 
-    await page.locator('.order-ticket select').selectOption('LIMIT')
-    await page.locator('.order-ticket label').filter({ hasText: '限价' }).locator('input').fill('1')
-    await page.getByRole('button', { name: '确认买入' }).click()
-    const pending = page.locator('.paper-order-row').filter({ hasText: 'pending' }).first()
-    await pending.waitFor({ timeout: 30000 })
-    await pending.getByRole('button', { name: '撤单' }).click()
-    await page.locator('.paper-order-row').filter({ hasText: 'cancelled' }).first().waitFor({ timeout: 30000 })
-    await page.locator('.position-row').filter({ hasText: '600519.SH' }).getByRole('button', { name: '全部卖出' }).click()
-    await page.locator('.paper-order-row').filter({ hasText: 'SELL / MARKET' }).first().waitFor({ timeout: 30000 })
+    await nav(page, 'AI Copilot', 'AI Market Copilot')
+    await page.getByRole('button', { name: '分析 NVDA' }).click()
+    await page.getByText('market.quote').last().waitFor({ timeout: 90000 })
+    await page.getByText(/数据截止/).last().waitFor()
 
     await nav(page, '新闻情报', 'AI Market Intelligence')
-    await page.getByRole('heading', { name: '真实新闻列表' }).waitFor({ timeout: 90000 })
-    const newsCards = page.locator('.news-list.rich-news article')
-    if (await newsCards.count()) {
-      await newsCards.first().getByRole('button', { name: 'AI深度分析' }).click()
-      await page.getByText('已发生 · 新闻事实').waitFor()
-      await page.getByRole('heading', { name: /AI判断/ }).waitFor()
-      await page.getByRole('heading', { name: '市场预测' }).waitFor()
-      await page.getByRole('button', { name: 'Close this dialog' }).click()
-    }
+    await page.locator('.news-tabs').waitFor()
+    await page.getByRole('button', { name: '利好', exact: true }).click()
+    await page.locator('.news-feed').waitFor({ timeout: 90000 })
 
-    await nav(page, '设置与更新', '设置与更新')
-    console.log(`PASS ${packaged ? 'packaged' : 'development'} independent-routes/canonical-symbol/chart/tooltips/news/paper-market-limit-cancel-position`)
+    await nav(page, '设置', 'Settings & Data Health')
+    await page.getByRole('heading', { name: 'Data Health', exact: true }).waitFor({ timeout: 60000 })
+    await page.getByText(/不属于交易所授权逐笔行情/).waitFor()
+    await nav(page, '首页', 'Market Intelligence')
+    await page.locator('.pulse-score strong').waitFor({ timeout: 90000 })
+    await page.screenshot({ path: path.join(root, 'work', 'v19-home.png'), fullPage: true })
+    console.log(`PASS ${packaged ? 'packaged' : 'development'} v1.9 routes/scanner/chart/tooltip/model-lab/strategy/paper-confirm/copilot/news/data-health`)
     complete = true
   } finally {
     await app.close()

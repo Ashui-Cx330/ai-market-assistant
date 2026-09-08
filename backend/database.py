@@ -8,6 +8,7 @@ import pandas as pd
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from threading import RLock
 
 data_root = os.environ.get("TRADING_AI_DATA_DIR")
 if data_root:
@@ -15,10 +16,14 @@ if data_root:
 else:
     DB_PATH = Path(__file__).resolve().parent.parent / "trading_ai.db"
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+_INIT_LOCK = RLock()
 
 
 @contextmanager
 def connection():
+    # Tests and the packaged launcher can switch the data root after import.
+    # Always create the exact active parent before opening SQLite.
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
@@ -29,7 +34,12 @@ def connection():
 
 
 def init_db() -> None:
-    with connection() as conn:
+    # Desktop startup, API tests and worker threads may all enter the migration
+    # path at nearly the same time.  SQLite has no `ALTER TABLE ... IF NOT
+    # EXISTS`, so the schema inspection and ALTER must be one local critical
+    # section.  This keeps repeated startup idempotent without deleting data.
+    with _INIT_LOCK, connection() as conn:
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute(
             """CREATE TABLE IF NOT EXISTS watchlist (
                 symbol TEXT PRIMARY KEY,
@@ -121,6 +131,10 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS trading_decisions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, decision_time TEXT NOT NULL,
                 payload_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS ai_score_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, asset_type TEXT NOT NULL,
+                score INTEGER NOT NULL, observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );"""
         )
         prediction_columns={row[1] for row in conn.execute("PRAGMA table_info(prediction_history)")}

@@ -1,6 +1,14 @@
 # AI行情助手自动更新与发布
 
-当前代码版本：**v1.8.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+当前代码版本：**v1.9.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+
+## v1.9.0 / 专业 AI 金融终端
+
+- 重构为市场、AI分析、策略、交易、AI、系统六组工作区，新增 Market Scanner、AI Screener、Model Lab 和工具型 AI Copilot。
+- 详情页以实时K线为主，AI Score 拆解趋势、技术、新闻、动能和风险，并明确它不是准确率。
+- 日线 AI Outlook 显示 T+1/T+5/T+20 概率、样本、模型状态、训练时间和可解释因素；Model Lab 如实披露 NVDA 样本外弱项与优势。
+- 新闻统一为 Event Impact；自然语言策略转成可审计规则；回测新增基准、年化、Sharpe 和回撤曲线。
+- 模拟交易改为三栏终端并强制订单确认；设置新增真实探测的数据健康中心与美股延迟声明。
 
 ## v1.8.0 / 可操作 AI 行情终端
 
