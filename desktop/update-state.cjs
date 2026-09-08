@@ -52,7 +52,21 @@ function recordLaunch() {
 
 function markHealthy() {
   const state = readState()
-  if (state.pendingVersion !== app.getVersion()) return state
+  if (state.pendingVersion !== app.getVersion()) {
+    // A direct installer run (including first install and an administrator
+    // repairing an installation) has no pending update transaction. Keep the
+    // stable-version ledger accurate without disturbing a different pending
+    // transaction that the rollback guard still owns.
+    if (!state.pendingVersion && state.updateStatus !== 'pending-health-check' && state.currentVersion !== app.getVersion()) {
+      updateLog(`healthy direct install confirmed: ${state.currentVersion || 'unknown'} -> ${app.getVersion()}`)
+      return writeState({
+        currentVersion: app.getVersion(), previousVersion: null, pendingVersion: null,
+        updateStatus: 'stable', healthCheck: 'passed', installResult: 'confirmed',
+        launchAttempts: 0, backupPath: null
+      })
+    }
+    return state
+  }
   updateLog(`health check passed: ${app.getVersion()}`)
   const backupPath = state.backupPath
   const result = writeState({ currentVersion: app.getVersion(), previousVersion: null, pendingVersion: null, updateStatus: 'stable', healthCheck: 'passed', installResult: 'confirmed', launchAttempts: 0, backupPath: null })

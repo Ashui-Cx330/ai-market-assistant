@@ -12,6 +12,9 @@ Set-Location $root
 if (-not $env:ELECTRON_BUILDER_BINARIES_MIRROR) {
   $env:ELECTRON_BUILDER_BINARIES_MIRROR = 'https://npmmirror.com/mirrors/electron-builder-binaries/'
 }
+if (-not $env:ELECTRON_MIRROR) {
+  $env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
+}
 
 # electron-builder only emits fresh latest.yml when a publish provider exists.
 # Resolve it automatically so direct builds cannot accidentally leave metadata
