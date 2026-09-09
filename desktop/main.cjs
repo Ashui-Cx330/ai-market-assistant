@@ -128,6 +128,13 @@ async function createWindow() {
   log(`startup health: electron=ok renderer=${rendererReady ? 'ok' : 'failed'} backend/database/api=${serviceHealthy ? 'ok' : 'failed'}`)
   if (!rendererReady || !serviceHealthy) throw new Error('启动健康检查失败：页面、本地服务或数据库未就绪。')
   log('main window loaded')
+  if (process.argv.includes('--updated') && !process.argv.includes('--post-update-restart')) {
+    log('updated installer launch validated; relaunching outside installer context')
+    stopBackend()
+    app.relaunch({ args: ['--post-update-restart'] })
+    app.exit(0)
+    return
+  }
   updateState.markHealthy()
   setTimeout(() => require('./updater.cjs').checkForUpdates(mainWindow, log, { beforeInstall: stopBackend }).catch(error => log(`update check failed ${error.message}`)), 2500)
 }
