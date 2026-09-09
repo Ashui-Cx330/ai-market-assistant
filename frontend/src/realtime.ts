@@ -28,7 +28,7 @@ class RealtimeMarketStore {
       this.connectionStatus.value="CONNECTED";this.reconnectSeconds=1;
       for(const request of this.wanted.values()) this.send({action:"subscribe",...request});
     };
-    this.socket.onmessage=(message)=>this.receive(JSON.parse(message.data) as RealtimeEvent);
+    this.socket.onmessage=(message)=>{try{this.receive(JSON.parse(message.data) as RealtimeEvent)}catch{this.connectionStatus.value="WARNING"}};
     this.socket.onerror=()=>{this.connectionStatus.value="WARNING"};
     this.socket.onclose=()=>{
       this.connectionStatus.value="DISCONNECTED";
@@ -62,6 +62,7 @@ class RealtimeMarketStore {
     const received=Date.now();
     const serverStamp=event.serverTimestamp||event.data?.serverTimestamp;
     if(serverStamp){const server=Date.parse(serverStamp);if(Number.isFinite(server))this.serverOffsetMs.value=server-received}
+    if(event.type==="hello"||event.type==="pong")this.connectionStatus.value="CONNECTED";
     if(event.key){
       if(event.type==="snapshot"||event.type==="ticker") this.states[event.key]=event.data;
       else if(event.type==="candle") this.states[event.key]=event.data.state;
@@ -78,12 +79,10 @@ class RealtimeMarketStore {
   }
 
   private checkStale(){
-    const recent=Object.values(this.states).reduce((value:any,item:any)=>Math.max(value,Number(item?.lastUpdateTime||0)),0);
-    if(!recent)return;
-    const age=(Date.now()/1000)-recent;
-    if(age>60)this.connectionStatus.value="DISCONNECTED";
-    else if(age>30)this.connectionStatus.value="STALE";
-    else if(age>10)this.connectionStatus.value="WARNING";
+    // Global status describes the local WebSocket itself. Individual market
+    // states already carry provider-aware freshness (including MARKET_CLOSED);
+    // an old or unsubscribed asset must not label the whole application offline.
+    if(this.socket?.readyState===WebSocket.OPEN&&this.connectionStatus.value==="CONNECTING")this.connectionStatus.value="CONNECTED";
   }
 }
 

@@ -1,6 +1,14 @@
 # AI行情助手自动更新与发布
 
-当前代码版本：**v1.9.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+当前代码版本：**v1.9.1**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+
+## v1.9.1 / 加载性能与连接稳定性修复
+
+- 资产详情把报价、K线、指标和 AI Score 合并成一次后端请求，移除三组重复外部行情请求。
+- AI 选股限制同时访问的数据源数量，设置 18 秒批次预算、单资产超时和 60 秒结果缓存；外部源异常时不再无限显示骨架屏。
+- 美股分钟报价路由不可达但真实K线可用时，明确使用带时间戳的最新真实K线降级，不伪造实时价格。
+- 实时行情改为打开资产后按需订阅，取消启动时无条件连接 BTC/OKX；区分本地 WebSocket 状态与单资产行情新鲜度。
+- Element Plus 按组件加载，ECharts 仅在详情/回测页异步加载；首屏 JS 由约 2.20 MB 降至约 196 KB，CSS 由约 384 KB 降至约 39 KB。
 
 ## v1.9.0 / 专业 AI 金融终端
 
@@ -69,10 +77,10 @@
 - GitHub Publisher 从构建环境变量 `GH_OWNER`、`GH_REPO` 读取，不在源码、前端或安装包中保存 Token。
 - 配置真实仓库后，electron-builder 同一次构建生成安装包、`.blockmap`、`latest.yml` 和客户端内置的 `app-update.yml`。
 - 下载由 electron-updater 校验；下载失败不会修改旧程序。
-- 安装前将当前稳定程序完整备份至 `%APPDATA%\AI行情助手\update-backups`，并启动独立的隐藏回滚守护。
+- 安装前将当前稳定程序完整备份至 `%LOCALAPPDATA%\Temp\AI行情助手-update-backups`，并启动独立的隐藏回滚守护。
 - 新版启动后验证 Electron、Renderer、本地后端、SQLite、核心健康 API 和首页。成功后确认新版并清理备份。
 - 超时或启动失败会恢复旧程序、重新启动旧版、记录 `update.log`，并把失败版本加入阻止列表。
-- 更新状态持久化在 `%APPDATA%\AI行情助手\update-state.json`。
+- 更新状态持久化在 `%LOCALAPPDATA%\Programs\AI行情助手 Update State\update-state.json`。
 - 用户数据库与程序分离，位于 `%APPDATA%\AI行情助手\database`。
 
 ## 一键发布

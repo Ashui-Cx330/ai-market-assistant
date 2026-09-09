@@ -4,7 +4,7 @@ const path = require('node:path')
 
 const root = path.resolve(__dirname, '..')
 const testData = path.join(root, 'work', 'desktop-e2e-data')
-fs.rmSync(testData, { recursive: true, force: true })
+if (process.env.AI_E2E_FRESH === '1') fs.rmSync(testData, { recursive: true, force: true })
 
 async function nav(page, label, heading) {
   await page.locator('.terminal-sidebar nav button').filter({ hasText: label }).click()
@@ -26,9 +26,17 @@ async function run() {
     await page.locator('.pulse-score strong').waitFor({ timeout: 90000 })
 
     await nav(page, '行情', 'Market Scanner')
-    await page.locator('.scanner-table tbody tr').first().waitFor({ timeout: 90000 })
-    await page.locator('.scanner-table tbody tr').filter({ hasText: 'NVDA' }).first().click()
-    await page.getByRole('heading', { name: /NVIDIA|NVDA/ }).first().waitFor({ timeout: 60000 })
+    const scannerRow = page.locator('.scanner-table tbody tr').first()
+    await scannerRow.waitFor({ timeout: 90000 })
+    const scannerSymbol = (await scannerRow.locator('td b').first().innerText()).trim()
+    // Search suggestions are deterministic even when a quote provider is down.
+    await page.locator('.global-search input').fill('NVDA')
+    await page.locator('.global-search button').filter({ hasText: '搜索' }).click()
+    await page.locator('.search-pop button').filter({ hasText: 'NVDA' }).first().waitFor()
+    // Detail/chart verification uses a row that the scanner just proved has a
+    // working real provider, rather than assuming Yahoo is reachable.
+    await scannerRow.click({ force: true })
+    await page.locator('.instrument-bar').filter({ hasText: scannerSymbol }).waitFor({ timeout: 60000 })
     try {
       await page.locator('.kline-chart canvas').waitFor({ timeout: 90000 })
     } catch (error) {
@@ -63,6 +71,10 @@ async function run() {
 
     await nav(page, '新闻情报', 'AI Market Intelligence')
     await page.locator('.news-tabs').waitFor()
+    // Navigation starts a real multi-provider collection. Let that request
+    // settle before changing the sentiment filter so the E2E does not create
+    // two identical cold collections at once.
+    await page.locator('.news-feed, .news-workspace .state-error').first().waitFor({ timeout: 90000 })
     await page.getByRole('button', { name: '利好', exact: true }).click()
     await page.locator('.news-feed').waitFor({ timeout: 90000 })
 

@@ -195,7 +195,10 @@ class RealtimeDataManager:
     async def start(self) -> None:
         self.running = True
         self.tasks["_system"] = [asyncio.create_task(self.health_loop(), name="realtime-health")]
-        self.tasks["_bootstrap"] = [asyncio.create_task(self.subscribe("crypto", "BTC", "1m"), name="realtime-default")]
+        # Upstream feeds are opened lazily by subscribe(). Starting two OKX
+        # sockets and a context collector before the UI selects any asset adds
+        # cold-start work and can starve unrelated scanner requests on networks
+        # where the exchange socket is blocked.
 
     async def stop(self) -> None:
         self.running = False

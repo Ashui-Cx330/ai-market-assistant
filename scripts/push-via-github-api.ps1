@@ -10,21 +10,31 @@ if (-not $gh) { $gh = Join-Path $env:LOCALAPPDATA 'Programs\GitHub CLI\bin\gh.ex
 if (-not (Test-Path -LiteralPath $gh)) { throw 'GitHub CLI is not installed.' }
 $tempJson = Join-Path $env:TEMP ("ai-market-github-api-" + [guid]::NewGuid().ToString('N') + '.json')
 
+function Invoke-GhText([string[]]$Arguments, [string]$Endpoint) {
+  for ($attempt = 1; $attempt -le 5; $attempt++) {
+    $output = & $gh @Arguments
+    if ($LASTEXITCODE -eq 0) { return ($output -join "`n") }
+    if ($attempt -eq 5) { throw "GitHub API request failed after $attempt attempts: $Endpoint" }
+    $delay = [Math]::Min(12, [Math]::Pow(2, $attempt))
+    Write-Warning "GitHub connection failed for $Endpoint; retry $($attempt + 1)/5 in $delay seconds."
+    Start-Sleep -Seconds $delay
+  }
+}
+
 function Invoke-GhJson([string]$Endpoint, [hashtable]$Body, [string]$Method = 'POST') {
   [IO.File]::WriteAllText($tempJson, ($Body | ConvertTo-Json -Depth 20 -Compress), (New-Object Text.UTF8Encoding($false)))
-  $output = & $gh api --method $Method $Endpoint --input $tempJson
-  if ($LASTEXITCODE -ne 0) { throw "GitHub API request failed: $Endpoint" }
+  $output = Invoke-GhText -Arguments @('api','--method',$Method,$Endpoint,'--input',$tempJson) -Endpoint $Endpoint
   return $output | ConvertFrom-Json
 }
 
 try {
   $localCommit = (& git rev-parse HEAD).Trim()
   $localParent = (& git rev-parse 'HEAD^').Trim()
-  $remoteParent = (& $gh api "repos/$Owner/$Repo/git/ref/heads/$Branch" --jq .object.sha).Trim()
+  $remoteParent = (Invoke-GhText -Arguments @('api',"repos/$Owner/$Repo/git/ref/heads/$Branch",'--jq','.object.sha') -Endpoint "refs/heads/$Branch").Trim()
   if ($localParent -ne $remoteParent) {
     throw "API fallback refuses a non-fast-forward push: local parent $localParent, remote $remoteParent"
   }
-  $baseTree = (& $gh api "repos/$Owner/$Repo/git/commits/$remoteParent" --jq .tree.sha).Trim()
+  $baseTree = (Invoke-GhText -Arguments @('api',"repos/$Owner/$Repo/git/commits/$remoteParent",'--jq','.tree.sha') -Endpoint "commits/$remoteParent").Trim()
   $entries = @()
   foreach ($line in @(git diff-tree --no-commit-id --name-status -r HEAD)) {
     $parts = $line -split "`t"

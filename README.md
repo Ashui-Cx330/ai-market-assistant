@@ -1,12 +1,12 @@
 # AI行情助手
 
-当前版本 v1.9.0 已升级为专业 AI 金融终端：Market Intelligence、Market Scanner、AI Screener、AI Outlook、Model Lab、Event Impact、自然语言策略、专业回测、三栏模拟交易、Data Health 与工具型 AI Copilot。审计与实测结果见 [PRODUCT_TERMINAL_AUDIT_V1.9.md](PRODUCT_TERMINAL_AUDIT_V1.9.md)。
+当前版本 v1.9.1 在专业 AI 金融终端基础上完成加载性能与连接稳定性修复：详情数据单请求加载、AI选股限时缓存、实时流按需订阅、前端图表异步加载。审计与实测结果见 [PRODUCT_TERMINAL_AUDIT_V1.9.md](PRODUCT_TERMINAL_AUDIT_V1.9.md)。
 
 本地运行的 A 股与加密货币行情研究平台，提供真实行情、K 线、技术指标、机器学习概率预测、历史回测、自选和模拟交易。系统不生成 Mock 行情，不连接真实交易账户，也不构成投资建议。
 
 ## Windows 安装
 
-双击 `outputs\desktop\AI-Market-Assistant-Setup-v1.9.0.exe` 完成安装。桌面会出现“AI行情助手”，以后直接双击即可；无需打开项目目录、Python、Node、Docker 或命令行。
+双击 `outputs\desktop\AI-Market-Assistant-Setup-v1.9.1.exe` 完成安装。桌面会出现“AI行情助手”，以后直接双击即可；无需打开项目目录、Python、Node、Docker 或命令行。
 
 - 程序目录：`%LOCALAPPDATA%\Programs\AI行情助手`
 - 用户数据：`%APPDATA%\AI行情助手`

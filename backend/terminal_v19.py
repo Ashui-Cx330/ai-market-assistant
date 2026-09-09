@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import math
 import re
 from datetime import datetime, time, timezone
@@ -17,18 +19,19 @@ from .indicators import calculate_indicators, indicator_payload
 from .market import canonical_symbol, crypto_kline, crypto_quote, stock_kline, stock_quote
 
 router = APIRouter(prefix="/api/terminal", tags=["Product Terminal v1.9"])
+_ANALYSIS_CPU_SEMAPHORE = asyncio.Semaphore(2)
 
 ASSETS = [
     {"symbol":"NVDA","name":"NVIDIA","asset_type":"stock","market":"美股","industry":"AI / 半导体"},
+    {"symbol":"600519","name":"贵州茅台","asset_type":"stock","market":"A股","industry":"消费"},
+    {"symbol":"BTC","name":"Bitcoin","asset_type":"crypto","market":"Crypto","industry":"数字资产"},
     {"symbol":"AMD","name":"AMD","asset_type":"stock","market":"美股","industry":"AI / 半导体"},
+    {"symbol":"300750","name":"宁德时代","asset_type":"stock","market":"A股","industry":"新能源"},
+    {"symbol":"ETH","name":"Ethereum","asset_type":"crypto","market":"Crypto","industry":"智能合约"},
     {"symbol":"AAPL","name":"Apple","asset_type":"stock","market":"美股","industry":"科技"},
+    {"symbol":"SOL","name":"Solana","asset_type":"crypto","market":"Crypto","industry":"智能合约"},
     {"symbol":"TSLA","name":"Tesla","asset_type":"stock","market":"美股","industry":"汽车"},
     {"symbol":"MSFT","name":"Microsoft","asset_type":"stock","market":"美股","industry":"软件 / AI"},
-    {"symbol":"600519","name":"贵州茅台","asset_type":"stock","market":"A股","industry":"消费"},
-    {"symbol":"300750","name":"宁德时代","asset_type":"stock","market":"A股","industry":"新能源"},
-    {"symbol":"BTC","name":"Bitcoin","asset_type":"crypto","market":"Crypto","industry":"数字资产"},
-    {"symbol":"ETH","name":"Ethereum","asset_type":"crypto","market":"Crypto","industry":"智能合约"},
-    {"symbol":"SOL","name":"Solana","asset_type":"crypto","market":"Crypto","industry":"智能合约"},
 ]
 
 
@@ -41,6 +44,14 @@ class ScannerRequest(BaseModel):
     min_volume_ratio: float = Field(default=0, ge=0, le=100)
     max_risk: int = Field(default=100, ge=0, le=100)
     news_direction: str = "全部"
+
+
+class AssetWorkspaceRequest(BaseModel):
+    symbol: str = Field(min_length=1, max_length=30)
+    asset_type: str
+    name: str | None = None
+    interval: str = "1d"
+    limit: int = Field(default=500, ge=80, le=1200)
 
 
 class CopilotRequest(BaseModel):
@@ -65,6 +76,20 @@ def _clamp(value: float) -> int:
 
 def _mean(values: list[float], default: float = 50) -> float:
     return float(sum(values) / len(values)) if values else default
+
+
+def _scanner_indicator_summary(candles: list[dict]) -> dict:
+    """Compute only fields used by scanner scoring; chart series are omitted."""
+    frame=calculate_indicators(candles)
+    if frame.empty: raise ValueError("没有可计算的 K线数据")
+    row=frame.iloc[-1]
+    fields=("ma20","ma60","macd","macd_signal","rsi","volume_ratio","atr","volatility")
+    latest={name:(None if pd.isna(row.get(name)) else round(float(row.get(name)),8)) for name in fields}
+    score=50
+    if latest["ma20"] and float(row["close"])>latest["ma20"]: score+=12
+    if latest["macd"] is not None and latest["macd_signal"] is not None and latest["macd"]>latest["macd_signal"]: score+=12
+    if latest["rsi"] is not None: score+=8 if 45<=latest["rsi"]<=65 else (-8 if latest["rsi"]>75 else 0)
+    return {"latest":latest,"series":[],"score":max(0,min(100,score))}
 
 
 def _news_dimension(symbol: str) -> tuple[int, str, list[dict]]:
@@ -124,27 +149,63 @@ def _score(quote: dict, indicators: dict, symbol: str) -> dict:
             "news_direction":news_label,"news":news_rows,"score_definition":"当前真实量价、技术指标与已采集新闻的综合信号评分，不是预测准确率或收益保证。"}
 
 
-async def analyze_asset(meta: dict) -> dict:
-    symbol, asset_type = meta["symbol"], meta["asset_type"]
-    canonical = canonical_symbol(symbol, asset_type)
-    quote_task = crypto_quote(canonical) if asset_type == "crypto" else stock_quote(canonical)
-    kline_task = crypto_kline(canonical,"1d",240) if asset_type == "crypto" else stock_kline(canonical,"1d",240)
-    quote,(candles,source) = await asyncio.gather(quote_task,kline_task)
-    indicators = await asyncio.to_thread(indicator_payload,candles)
-    analysis = await asyncio.to_thread(_score,quote,indicators,canonical)
-    def record_score() -> int | None:
-        with connection() as conn:
-            previous=conn.execute("SELECT score FROM ai_score_history WHERE symbol=? AND asset_type=? ORDER BY id DESC LIMIT 1",(canonical,asset_type)).fetchone()
-            prior=int(previous[0]) if previous else None
-            if prior != analysis["ai_score"]:
-                conn.execute("INSERT INTO ai_score_history(symbol,asset_type,score) VALUES(?,?,?)",(canonical,asset_type,analysis["ai_score"]))
-            return analysis["ai_score"]-prior if prior is not None else None
-    score_change=await asyncio.to_thread(record_score)
-    return {**meta,**quote,**analysis,"canonical_symbol":canonical,"kline_source":source,
+async def _compose_analysis(meta: dict, quote: dict, candles: list[dict], source: str,
+                            indicators: dict | None = None, compact: bool = False) -> dict:
+    canonical = canonical_symbol(meta["symbol"], meta["asset_type"])
+    asset_type = meta["asset_type"]
+    async with _ANALYSIS_CPU_SEMAPHORE:
+        indicators = indicators or await asyncio.to_thread(_scanner_indicator_summary if compact else indicator_payload,candles)
+        analysis = await asyncio.to_thread(_score,quote,indicators,canonical)
+        def record_score() -> int | None:
+            with connection() as conn:
+                previous=conn.execute("SELECT score FROM ai_score_history WHERE symbol=? AND asset_type=? ORDER BY id DESC LIMIT 1",(canonical,asset_type)).fetchone()
+                prior=int(previous[0]) if previous else None
+                if prior != analysis["ai_score"]:
+                    conn.execute("INSERT INTO ai_score_history(symbol,asset_type,score) VALUES(?,?,?)",(canonical,asset_type,analysis["ai_score"]))
+                return analysis["ai_score"]-prior if prior is not None else None
+        score_change=await asyncio.to_thread(record_score)
+    return {**quote,**meta,**analysis,"canonical_symbol":canonical,"kline_source":source,
             "score_change":score_change,
             "volume_ratio":indicators["latest"].get("volume_ratio"),"rsi":indicators["latest"].get("rsi"),
             "volatility":indicators["latest"].get("volatility"),
             "preview":candles[-30:],"data_cutoff":candles[-1]["timestamp"]}
+
+
+async def _market_pair(symbol: str, asset_type: str, interval: str, limit: int) -> tuple[dict,list[dict],str]:
+    quote_call=crypto_quote(symbol) if asset_type=="crypto" else stock_quote(symbol)
+    kline_call=crypto_kline(symbol,interval,limit) if asset_type=="crypto" else stock_kline(symbol,interval,limit)
+    quote_result,kline_result=await asyncio.gather(quote_call,kline_call,return_exceptions=True)
+    if isinstance(kline_result,BaseException): raise kline_result
+    candles,source=kline_result
+    if not candles: raise RuntimeError("行情源没有返回真实K线")
+    if isinstance(quote_result,BaseException):
+        # A provider's 1-minute quote route may be blocked while its historical
+        # route is healthy. Use the latest real candle explicitly as a delayed
+        # fallback instead of discarding the whole workspace or inventing data.
+        latest=candles[-1];previous=candles[-2] if len(candles)>1 else latest
+        price=float(latest["close"]);prior=float(previous["close"])
+        is_a_share=asset_type=="stock" and (symbol.isdigit() or symbol.endswith((".SH",".SZ")))
+        quote_result={"symbol":symbol,"canonical_symbol":symbol,"name":symbol,"asset_type":asset_type,
+                      "market":"Crypto" if asset_type=="crypto" else "A股" if is_a_share else "美股",
+                      "currency":"USDT" if asset_type=="crypto" else "CNY" if is_a_share else "USD",
+                      "price":price,"change":price-prior,"change_percent":((price/prior)-1)*100 if prior else 0,
+                      "open":float(latest["open"]),"previous_close":prior,"high":float(latest["high"]),
+                      "low":float(latest["low"]),"volume":float(latest["volume"]),"amount":latest.get("amount"),
+                      "source":source+"（最新真实K线降级报价）","updated_at":latest["timestamp"],
+                      "quote_status":"DELAYED_KLINE_FALLBACK","quote_error":type(quote_result).__name__}
+    return quote_result,candles,source
+
+
+async def analyze_asset(meta: dict) -> dict:
+    symbol, asset_type = meta["symbol"], meta["asset_type"]
+    canonical = canonical_symbol(symbol, asset_type)
+    analysis_key = f"terminal-analysis-v19:{asset_type}:{canonical}"
+    if saved := cache.get(analysis_key):
+        return {**saved, **meta}
+    quote,candles,source = await _market_pair(canonical,asset_type,"1d",240)
+    result = await _compose_analysis(meta, quote, candles, source, compact=True)
+    cache.set(analysis_key, result, 120)
+    return result
 
 
 async def scan_assets(request: ScannerRequest, limit: int = 20) -> dict:
@@ -155,6 +216,11 @@ async def scan_assets(request: ScannerRequest, limit: int = 20) -> dict:
         if key not in existing:
             market="Crypto" if row["asset_type"]=="crypto" else "美股" if re.match(r"^[A-Z]",row["symbol"]) else "A股"
             candidates.append({"symbol":row["symbol"],"name":row.get("name") or row["symbol"],"asset_type":row["asset_type"],"market":market,"industry":"自选"})
+    cache_payload={"filters":request.model_dump(),"limit":limit,
+                   "watchlist":[(x["symbol"],x["asset_type"]) for x in candidates if x.get("industry")=="自选"]}
+    scan_key="terminal-scan-v19:"+hashlib.sha256(json.dumps(cache_payload,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+    if saved := cache.get(scan_key):
+        return {**saved,"cache_status":"FRESH"}
     query=request.query.strip().lower()
     natural=any(token in query for token in ("找出","筛选","趋势","板块","score","成交量","放大","风险"))
     if "美股" in query: candidates=[x for x in candidates if x["market"]=="美股"]
@@ -167,7 +233,21 @@ async def scan_assets(request: ScannerRequest, limit: int = 20) -> dict:
         candidates=[x for x in candidates if query in x["symbol"].lower() or query in x["name"].lower() or query in x["industry"].lower()]
     if request.market!="全部":candidates=[x for x in candidates if x["market"]==request.market]
     if request.industry!="全部":candidates=[x for x in candidates if request.industry.lower() in x["industry"].lower()]
-    results=await asyncio.gather(*(analyze_asset(x) for x in candidates[:limit]),return_exceptions=True)
+    # A broad scan must not open twenty provider connections at once: on
+    # constrained/proxied networks that can starve the event loop itself.
+    # Return the completed real rows within one bounded page-load budget and
+    # report timed-out symbols explicitly.
+    provider_slots=asyncio.Semaphore(3)
+    async def bounded_analysis(meta: dict) -> dict:
+        async with provider_slots:
+            return await analyze_asset(meta)
+    tasks=[asyncio.create_task(bounded_analysis(x)) for x in candidates[:limit]]
+    done,pending=await asyncio.wait(tasks,timeout=18)
+    for task in pending: task.cancel()
+    if pending: await asyncio.gather(*pending,return_exceptions=True)
+    results=[task.result() if task in done and not task.cancelled() and task.exception() is None
+             else task.exception() if task in done and not task.cancelled()
+             else TimeoutError("provider budget exceeded") for task in tasks]
     rows=[];errors=[]
     for meta,result in zip(candidates[:limit],results):
         if isinstance(result,Exception): errors.append({"symbol":meta["symbol"],"error":f"{type(result).__name__}: {str(result)[:160]}"})
@@ -180,9 +260,12 @@ async def scan_assets(request: ScannerRequest, limit: int = 20) -> dict:
     if "趋势向上" in query: rows=[x for x in rows if x["components"]["trend"]>=60]
     if "成交量放大" in query or "放量" in query: rows=[x for x in rows if float(x.get("volume_ratio") or 0)>1]
     rows.sort(key=lambda x:(x["ai_score"],float(x.get("change_percent") or -999)),reverse=True)
-    return {"rows":rows,"errors":errors,"requested":len(candidates[:limit]),"available":len(rows),
+    result={"rows":rows,"errors":errors,"requested":len(candidates[:limit]),"available":len(rows),
             "universe":"curated liquid cross-market universe plus local watchlist; every row is fetched from a public market source",
-            "generated_at":datetime.now(timezone.utc).isoformat()}
+            "generated_at":datetime.now(timezone.utc).isoformat(),"cache_status":"MISS"}
+    if rows:
+        cache.set(scan_key, result, 60)
+    return result
 
 
 def _market_status() -> list[dict]:
@@ -202,6 +285,26 @@ def _market_status() -> list[dict]:
 @router.post("/scanner")
 async def scanner(body: ScannerRequest) -> dict:
     return {"success":True,"data":await scan_assets(body),"source":"public market APIs + locally persisted public news"}
+
+
+@router.post("/asset-workspace")
+async def asset_workspace(body: AssetWorkspaceRequest) -> dict:
+    """Load one detail workspace without fetching quote/K-line data twice."""
+    asset_type=body.asset_type.lower()
+    if asset_type not in {"stock","crypto"}: raise HTTPException(422,"asset_type 仅支持 stock 或 crypto")
+    canonical=canonical_symbol(body.symbol,asset_type)
+    try:
+        quote,candles,source=await asyncio.wait_for(
+            _market_pair(canonical,asset_type,body.interval,body.limit),timeout=30)
+    except TimeoutError as exc:
+        raise HTTPException(504,"公开行情源响应超过30秒，请稍后重试") from exc
+    indicators=await asyncio.to_thread(indicator_payload,candles)
+    market="Crypto" if asset_type=="crypto" else "A股" if canonical.isdigit() else "美股"
+    meta={"symbol":canonical,"name":body.name or quote.get("name") or canonical,"asset_type":asset_type,
+          "market":market,"industry":"详情资产"}
+    analysis=await _compose_analysis(meta,quote,candles,source,indicators)
+    return {"success":True,"data":{"quote":quote,"candles":candles,"indicators":indicators,"analysis":analysis,
+            "source":source,"data_cutoff":candles[-1]["timestamp"]},"source":source}
 
 
 @router.get("/dashboard")

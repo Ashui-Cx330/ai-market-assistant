@@ -1,7 +1,8 @@
 import { createApp } from 'vue'
-import ElementPlus from 'element-plus'
-import 'element-plus/dist/index.css'
+import { ElDialog } from 'element-plus'
+import 'element-plus/es/components/base/style/css'
+import 'element-plus/es/components/dialog/style/css'
+import 'element-plus/es/components/message/style/css'
 import './style.css'
 import App from './App.vue'
-createApp(App).use(ElementPlus).mount('#app')
-
+createApp(App).component('ElDialog', ElDialog).mount('#app')
