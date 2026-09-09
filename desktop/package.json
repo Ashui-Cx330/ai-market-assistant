@@ -1,7 +1,7 @@
 {
   "name": "ai-market-assistant-desktop",
   "productName": "AI行情助手",
-  "version": "1.9.5",
+  "version": "1.9.6",
   "private": true,
   "author": "AI行情助手 Project",
   "description": "本地 AI 股票与加密货币行情研究平台",
@@ -26,7 +26,8 @@
     "productName": "AI行情助手",
     "asar": true,
     "asarUnpack": [
-      "rollback-guard.ps1"
+      "rollback-guard.ps1",
+      "post-update-restart.ps1"
     ],
     "directories": {
       "output": "../outputs/desktop"
@@ -39,6 +40,7 @@
       "update-policy.cjs",
       "update-state.cjs",
       "rollback-guard.ps1",
+      "post-update-restart.ps1",
       "assets/**/*",
       "package.json"
     ],

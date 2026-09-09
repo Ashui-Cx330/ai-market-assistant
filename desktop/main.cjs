@@ -119,6 +119,18 @@ async function createWindow() {
   if (!rendererReady || !serviceHealthy) throw new Error('启动健康检查失败：页面、本地服务或数据库未就绪。')
   log('main window loaded')
   updateState.markHealthy()
+  if (process.argv.includes('--updated') && !process.argv.includes('--post-update-restart')) {
+    const helper = path.join(process.resourcesPath, 'app.asar.unpacked', 'post-update-restart.ps1')
+    log('updated installer environment detected; scheduling one clean restart')
+    stopBackend()
+    const child = spawn('powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+      '-File', helper, '-Executable', process.execPath
+    ], { detached: true, windowsHide: true, stdio: 'ignore' })
+    child.unref()
+    app.quit()
+    return
+  }
   setTimeout(() => require('./updater.cjs').checkForUpdates(mainWindow, log, { beforeInstall: stopBackend }).catch(error => log(`update check failed ${error.message}`)), 2500)
 }
 
