@@ -18,14 +18,18 @@ const updateState = require('./update-state.cjs')
 // NSIS --force-run can inherit transient installer profile variables. Resolve
 // the per-user data roots from the actual Windows home before Electron reads
 // appData/userData, so an updated launch immediately opens the persistent DB.
-if (process.platform === 'win32' && process.argv.includes('--updated')) {
-  const userHome = process.env.USERPROFILE || os.homedir()
+const windowsUserHome = process.env.USERPROFILE || os.homedir()
+if (process.platform === 'win32' && (process.argv.includes('--updated') || process.argv.includes('--post-update-restart'))) {
+  const userHome = windowsUserHome
   process.env.APPDATA = path.join(userHome, 'AppData', 'Roaming')
   process.env.LOCALAPPDATA = path.join(userHome, 'AppData', 'Local')
 }
 
 app.setName(APP_NAME)
-app.setPath('userData', process.env.TRADING_AI_TEST_DATA_DIR ? path.join(process.env.TRADING_AI_TEST_DATA_DIR, 'electron') : path.join(app.getPath('appData'), APP_NAME))
+const persistentUserData = process.platform === 'win32'
+  ? path.join(windowsUserHome, 'AppData', 'Roaming', APP_NAME)
+  : path.join(app.getPath('appData'), APP_NAME)
+app.setPath('userData', process.env.TRADING_AI_TEST_DATA_DIR ? path.join(process.env.TRADING_AI_TEST_DATA_DIR, 'electron') : persistentUserData)
 app.enableSandbox()
 const logFile = path.join(app.getPath('userData'), 'desktop.log')
 fs.mkdirSync(app.getPath('userData'), { recursive: true })

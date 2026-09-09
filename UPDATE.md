@@ -1,6 +1,11 @@
 # AI行情助手自动更新与发布
 
-当前代码版本：**v1.10.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+当前代码版本：**v1.10.1**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+
+## v1.10.1 / 固定持久化目录
+
+- Windows `userData` 直接设置为当前用户配置目录的绝对路径，绕过 Electron 在 NSIS 环境中提前缓存的临时 `appData`。
+- 后端数据库、桌面日志和设置始终解析到同一持久化目录。
 
 ## v1.10.0 / Electron 原生更新重启
 
