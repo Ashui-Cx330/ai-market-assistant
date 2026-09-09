@@ -1,6 +1,11 @@
 # AI行情助手自动更新与发布
 
-当前代码版本：**v1.9.7**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+当前代码版本：**v1.9.8**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+
+## v1.9.8 / 重启助手参数兼容修复
+
+- 避免重启脚本参数与 PowerShell 只读 `$PID` 变量冲突。
+- 已验证助手等待源进程退出后能够以 `--post-update-restart` 正常启动客户端。
 
 ## v1.9.7 / 单实例锁交接修复
 
