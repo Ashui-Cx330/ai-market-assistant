@@ -119,7 +119,7 @@ async function createWindow() {
   if (!rendererReady || !serviceHealthy) throw new Error('启动健康检查失败：页面、本地服务或数据库未就绪。')
   log('main window loaded')
   updateState.markHealthy()
-  setTimeout(() => require('./updater.cjs').checkForUpdates(mainWindow, log).catch(error => log(`update check failed ${error.message}`)), 2500)
+  setTimeout(() => require('./updater.cjs').checkForUpdates(mainWindow, log, { beforeInstall: stopBackend }).catch(error => log(`update check failed ${error.message}`)), 2500)
 }
 
 if (lock) {
@@ -128,7 +128,7 @@ if (lock) {
     app.whenReady().then(() => dialog.showMessageBox({ type: 'warning', title: '自动回滚完成', message: `新版本启动失败，已自动恢复到稳定版本 v${launchState.currentVersion}。`, buttons: ['知道了'] }))
     updateState.writeState({ rollbackMessage: null })
   }
-  ipcMain.handle('desktop:check-for-updates', () => require('./updater.cjs').checkForUpdates(mainWindow, log, { interactive: true }))
+  ipcMain.handle('desktop:check-for-updates', () => require('./updater.cjs').checkForUpdates(mainWindow, log, { interactive: true, beforeInstall: stopBackend }))
   app.on('second-instance', () => {
     if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus() }
   })

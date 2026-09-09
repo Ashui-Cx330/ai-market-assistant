@@ -175,6 +175,10 @@ async function checkForUpdates(parent, log, options = {}) {
     if (action === 'downloaded') {
       parent?.setProgressBar(-1)
       copyInstalledVersion(info)
+      if (typeof options.beforeInstall === 'function') {
+        state.updateLog('stopping owned backend before installer handoff')
+        options.beforeInstall()
+      }
       startRollbackGuard()
       installing = true
       state.updateLog('silent installer launching once; current app will quit')
