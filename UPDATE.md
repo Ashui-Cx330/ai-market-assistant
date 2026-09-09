@@ -1,6 +1,11 @@
 # AI行情助手自动更新与发布
 
-当前代码版本：**v1.10.2**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+当前代码版本：**v1.10.3**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+
+## v1.10.3 / Codex MSIX 数据安全迁移
+
+- 首次启动检测 Windows 对 Codex 开发进程生成的 MSIX 虚拟化数据库。
+- 先备份正式数据库，再以 `INSERT OR IGNORE` 合并缺失记录；正式库现有记录优先，迁移不删除用户数据。
 
 ## v1.10.2 / 后端启动前数据目录绑定
 
