@@ -1,6 +1,11 @@
 # AI行情助手自动更新与发布
 
-当前代码版本：**v1.10.1**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+当前代码版本：**v1.10.2**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+
+## v1.10.2 / 后端启动前数据目录绑定
+
+- Electron 同时通过环境变量和 `--data-dir` 参数传入持久化目录。
+- PyInstaller 后端在导入 FastAPI 与数据库模块之前解析该参数，避免初始化临时默认库。
 
 ## v1.10.1 / 固定持久化目录
 

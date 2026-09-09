@@ -62,8 +62,8 @@ function startBackend() {
   if (app.isPackaged) {
     const executable = path.join(process.resourcesPath, 'backend', 'AI行情助手服务.exe')
     if (!fs.existsSync(executable)) throw new Error(`缺少后端组件：${executable}`)
-    backendProcess = spawn(executable, ['--host', SERVICE_HOST, '--port', String(SERVICE_PORT)], {
-      windowsHide: true, stdio: 'ignore', env: { ...process.env, TRADING_AI_DATA_DIR: dataDir, TRADING_AI_DESKTOP: '1', TRADING_AI_FRONTEND_DIR: path.join(process.resourcesPath, 'app', 'frontend', 'dist') }
+    backendProcess = spawn(executable, ['--host', SERVICE_HOST, '--port', String(SERVICE_PORT), '--data-dir', dataDir], {
+      cwd: dataDir, windowsHide: true, stdio: 'ignore', env: { ...process.env, TRADING_AI_DATA_DIR: dataDir, TRADING_AI_DESKTOP: '1', TRADING_AI_FRONTEND_DIR: path.join(process.resourcesPath, 'app', 'frontend', 'dist') }
     })
   } else {
     const pythonw = path.join(projectRoot(), '.venv', 'Scripts', 'pythonw.exe')
