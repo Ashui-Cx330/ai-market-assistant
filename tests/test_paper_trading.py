@@ -38,6 +38,7 @@ def test_limit_order_freeze_fill_cancel_and_reset(tmp_path, monkeypatch):
 
 
 def test_daily_equity_baseline_and_a_share_currency(tmp_path, monkeypatch):
+    monkeypatch.delenv("TRADING_AI_DATA_DIR", raising=False)
     monkeypatch.setattr(database,"DB_PATH",tmp_path/"daily.sqlite3");database.init_db()
     assert database.paper_daily_pnl("USD",100000,"2026-09-08")==0
     assert database.paper_daily_pnl("USD",100125.5,"2026-09-08")==125.5
@@ -46,6 +47,7 @@ def test_daily_equity_baseline_and_a_share_currency(tmp_path, monkeypatch):
 
 
 def test_marked_snapshot_returns_one_consistent_account_view(tmp_path, monkeypatch):
+    monkeypatch.delenv("TRADING_AI_DATA_DIR", raising=False)
     monkeypatch.setattr(database,"DB_PATH",tmp_path/"snapshot.sqlite3")
     monkeypatch.setattr(main,"DB_PATH",database.DB_PATH)
     database.init_db()

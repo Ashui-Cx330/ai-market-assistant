@@ -1,6 +1,11 @@
 # AI行情助手自动更新与发布
 
-当前代码版本：**v1.9.2**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+当前代码版本：**v1.9.3**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+
+## v1.9.3 / Windows 持久化路径强制修复
+
+- 桌面启动器传入数据目录时始终优先使用该目录，禁止导入期 `DB_PATH` 或 PyInstaller `_MEI` 临时路径覆盖。
+- 增加实际写入与重新读取回归，确保安装版真正读写 `%APPDATA%\AI行情助手\database\trading_ai.db`。
 
 ## v1.9.2 / Windows 用户数据路径修复
 

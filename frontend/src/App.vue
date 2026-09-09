@@ -12,7 +12,7 @@ const KlineChart=defineAsyncComponent(()=>import('./KlineChart.vue'))
 const PerformanceChart=defineAsyncComponent(()=>import('./PerformanceChart.vue'))
 
 type Page='home'|'market'|'detail'|'watchlist'|'screener'|'prediction'|'modelLab'|'news'|'strategy'|'backtest'|'paper'|'copilot'|'settings'
-const page=ref<Page>('home'),appVersion=ref('1.9.2'),pageLoading=ref(false),pageError=ref('')
+const page=ref<Page>('home'),appVersion=ref('1.9.3'),pageLoading=ref(false),pageError=ref('')
 const dashboard=ref<any>(null),scanner=ref<any>({rows:[],errors:[]}),modelLab=ref<any>(null),dataHealth=ref<any>(null)
 const scannerFilters=ref({query:'',market:'全部',industry:'全部',change:'全部',min_ai_score:0,min_volume_ratio:0,max_risk:100,news_direction:'全部'})
 const scannerLoading=ref(false),hoveredRow=ref<any>(null),watchlist=ref<any[]>([]),watchRows=ref<any[]>([]),watchSort=ref('score')

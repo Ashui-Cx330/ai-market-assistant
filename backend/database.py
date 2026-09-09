@@ -29,8 +29,6 @@ def database_path() -> Path:
     extraction directory.  Tests can still override DB_PATH when no launcher
     data directory is present.
     """
-    if DB_PATH != _IMPORT_DB_PATH:
-        return DB_PATH
     active_root = os.environ.get("TRADING_AI_DATA_DIR")
     return Path(active_root) / "database" / "trading_ai.db" if active_root else DB_PATH
 
