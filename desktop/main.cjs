@@ -125,7 +125,7 @@ async function createWindow() {
     stopBackend()
     const child = spawn('powershell.exe', [
       '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
-      '-File', helper, '-Executable', process.execPath
+      '-File', helper, '-Executable', process.execPath, '-ParentPid', String(process.pid)
     ], { detached: true, windowsHide: true, stdio: 'ignore' })
     child.unref()
     app.quit()
