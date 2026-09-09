@@ -16,15 +16,32 @@ if data_root:
 else:
     DB_PATH = Path(__file__).resolve().parent.parent / "trading_ai.db"
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+_IMPORT_DB_PATH = DB_PATH
 _INIT_LOCK = RLock()
+
+
+def database_path() -> Path:
+    """Resolve the desktop data directory at call time.
+
+    PyInstaller's one-file child process can import modules while its bootstrap
+    environment is still being normalised.  Re-reading the launcher-provided
+    path here prevents SQLite from ever falling back to the temporary _MEI
+    extraction directory.  Tests can still override DB_PATH when no launcher
+    data directory is present.
+    """
+    if DB_PATH != _IMPORT_DB_PATH:
+        return DB_PATH
+    active_root = os.environ.get("TRADING_AI_DATA_DIR")
+    return Path(active_root) / "database" / "trading_ai.db" if active_root else DB_PATH
 
 
 @contextmanager
 def connection():
     # Tests and the packaged launcher can switch the data root after import.
     # Always create the exact active parent before opening SQLite.
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    active_path = database_path()
+    active_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(active_path)
     conn.row_factory = sqlite3.Row
     try:
         yield conn

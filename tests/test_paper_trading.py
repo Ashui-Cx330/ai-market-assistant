@@ -52,3 +52,12 @@ def test_marked_snapshot_returns_one_consistent_account_view(tmp_path, monkeypat
     snapshot=asyncio.run(main._marked_snapshot())
     assert len(snapshot["accounts"])==3
     assert all(a["today_pnl"]==0 and a["total_equity"]==100000 for a in snapshot["accounts"])
+
+
+def test_runtime_desktop_data_dir_wins_over_import_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_PATH", database._IMPORT_DB_PATH)
+    monkeypatch.setenv("TRADING_AI_DATA_DIR", str(tmp_path))
+    expected = tmp_path / "database" / "trading_ai.db"
+    assert database.database_path() == expected
+    database.init_db()
+    assert expected.exists()

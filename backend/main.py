@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from .ai_engine import feature_frame, predict
 from .backtest import run_backtest
-from .database import (DB_PATH, add_watchlist, cancel_paper_order, connection, create_limit_order, execute_paper_order,
+from .database import (DB_PATH, add_watchlist, cancel_paper_order, connection, create_limit_order, database_path, execute_paper_order,
                        fill_limit_order, init_db, list_backtests, list_watchlist,
                        get_news_intelligence, load_news_intelligence, load_provider_health, query_news_intelligence,
                        paper_daily_pnl, paper_snapshot, prediction_history, prediction_statistics, remove_watchlist,
@@ -158,7 +158,7 @@ def health() -> dict:
     frontend_ready = (DIST / "index.html").exists()
     return {"status": "ok", "service": "AI行情助手", "phase": "v1.9 专业AI金融终端", "version": VERSION,
             "desktop": os.environ.get("TRADING_AI_DESKTOP") == "1", "database": "ok",
-            "database_path": str(DB_PATH), "frontend": "ok" if frontend_ready else "missing"}
+            "database_path": str(database_path()), "frontend": "ok" if frontend_ready else "missing"}
 
 
 @app.get("/api/realtime/time")
