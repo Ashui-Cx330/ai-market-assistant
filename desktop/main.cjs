@@ -1,5 +1,6 @@
 const { spawn, spawnSync } = require('node:child_process')
 const fs = require('node:fs')
+const os = require('node:os')
 const path = require('node:path')
 const { app, BrowserWindow, dialog, Menu, ipcMain } = require('electron/main')
 const { shell } = require('electron/common')
@@ -13,6 +14,15 @@ let backendProcess = null
 let ownsBackend = false
 let quitting = false
 const updateState = require('./update-state.cjs')
+
+// NSIS --force-run can inherit transient installer profile variables. Resolve
+// the per-user data roots from the actual Windows home before Electron reads
+// appData/userData, so an updated launch immediately opens the persistent DB.
+if (process.platform === 'win32' && process.argv.includes('--updated')) {
+  const userHome = process.env.USERPROFILE || os.homedir()
+  process.env.APPDATA = path.join(userHome, 'AppData', 'Roaming')
+  process.env.LOCALAPPDATA = path.join(userHome, 'AppData', 'Local')
+}
 
 app.setName(APP_NAME)
 app.setPath('userData', process.env.TRADING_AI_TEST_DATA_DIR ? path.join(process.env.TRADING_AI_TEST_DATA_DIR, 'electron') : path.join(app.getPath('appData'), APP_NAME))
@@ -119,18 +129,6 @@ async function createWindow() {
   if (!rendererReady || !serviceHealthy) throw new Error('启动健康检查失败：页面、本地服务或数据库未就绪。')
   log('main window loaded')
   updateState.markHealthy()
-  if (process.argv.includes('--updated') && !process.argv.includes('--post-update-restart')) {
-    const helper = path.join(process.resourcesPath, 'app.asar.unpacked', 'post-update-restart.ps1')
-    log('updated installer environment detected; scheduling one clean restart')
-    stopBackend()
-    const child = spawn('powershell.exe', [
-      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
-      '-File', helper, '-Executable', process.execPath, '-SourceProcessId', String(process.pid)
-    ], { detached: true, windowsHide: true, stdio: 'ignore' })
-    child.unref()
-    app.quit()
-    return
-  }
   setTimeout(() => require('./updater.cjs').checkForUpdates(mainWindow, log, { beforeInstall: stopBackend }).catch(error => log(`update check failed ${error.message}`)), 2500)
 }
 
