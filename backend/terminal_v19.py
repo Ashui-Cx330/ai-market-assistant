@@ -5,7 +5,7 @@ import hashlib
 import json
 import math
 import re
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -14,12 +14,27 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .cache import cache
-from .database import connection, list_watchlist, load_news_intelligence, load_provider_health
+from .database import (connection, list_watchlist, load_news_intelligence,
+                       load_provider_health, query_news_intelligence,
+                       save_news_intelligence, save_provider_health)
 from .indicators import calculate_indicators, indicator_payload
 from .market import canonical_symbol, crypto_kline, crypto_quote, stock_kline, stock_quote
+from .news_intelligence import build_intelligence, collect_news
+from .strategy_engine import StrategyEngine
 
 router = APIRouter(prefix="/api/terminal", tags=["Product Terminal v1.9"])
 _ANALYSIS_CPU_SEMAPHORE = asyncio.Semaphore(2)
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _background(coro, name: str) -> None:
+    """Run bounded refresh work without making navigation wait for providers."""
+    if any(task.get_name() == name and not task.done() for task in _BACKGROUND_TASKS):
+        coro.close()
+        return
+    task=asyncio.create_task(coro,name=name)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
 
 ASSETS = [
     {"symbol":"NVDA","name":"NVIDIA","asset_type":"stock","market":"美股","industry":"AI / 半导体"},
@@ -208,7 +223,7 @@ async def analyze_asset(meta: dict) -> dict:
     return result
 
 
-async def scan_assets(request: ScannerRequest, limit: int = 20) -> dict:
+async def scan_assets(request: ScannerRequest, limit: int = 20, provider_concurrency: int = 3) -> dict:
     candidates = list(ASSETS)
     existing={(x["symbol"],x["asset_type"]) for x in candidates}
     for row in list_watchlist():
@@ -237,7 +252,7 @@ async def scan_assets(request: ScannerRequest, limit: int = 20) -> dict:
     # constrained/proxied networks that can starve the event loop itself.
     # Return the completed real rows within one bounded page-load budget and
     # report timed-out symbols explicitly.
-    provider_slots=asyncio.Semaphore(3)
+    provider_slots=asyncio.Semaphore(max(1,provider_concurrency))
     async def bounded_analysis(meta: dict) -> dict:
         async with provider_slots:
             return await analyze_asset(meta)
@@ -307,11 +322,8 @@ async def asset_workspace(body: AssetWorkspaceRequest) -> dict:
             "source":source,"data_cutoff":candles[-1]["timestamp"]},"source":source}
 
 
-@router.get("/dashboard")
-async def dashboard(force: bool = False) -> dict:
-    if not force and (saved:=cache.get("terminal-v19-dashboard")):
-        return {"success":True,"data":saved,"source":"short-lived terminal cache"}
-    scanned=await scan_assets(ScannerRequest())
+async def _build_dashboard(provider_concurrency: int = 3) -> dict:
+    scanned=await scan_assets(ScannerRequest(),provider_concurrency=provider_concurrency)
     rows=scanned["rows"]
     if not rows: raise HTTPException(503,"所有公开行情源暂时不可用")
     trend=_clamp(_mean([x["components"]["trend"] for x in rows]));sentiment=_clamp(_mean([x["components"]["news"] for x in rows]))
@@ -335,7 +347,154 @@ async def dashboard(force: bool = False) -> dict:
             "data_cutoff":max((x.get("updated_at") or "" for x in rows),default=""),"generated_at":datetime.now(timezone.utc).isoformat(),
             "errors":scanned["errors"],"method":"deterministic aggregation of real quotes, OHLCV indicators and persisted public news"}
     cache.set("terminal-v19-dashboard",result,30)
-    return {"success":True,"data":result,"source":"public market APIs + locally persisted public news"}
+    return result
+
+
+async def _refresh_dashboard() -> None:
+    try:
+        # One provider/indicator job at a time keeps the API event loop and the
+        # Electron renderer responsive while the old observed snapshot remains
+        # visible.
+        await _build_dashboard(provider_concurrency=1)
+    except Exception:
+        # A stale observed snapshot remains preferable to a blank terminal when
+        # a public provider is temporarily blocked.
+        return
+
+
+@router.get("/dashboard")
+async def dashboard(force: bool = False) -> dict:
+    fresh=cache.get("terminal-v19-dashboard")
+    if fresh and not force:
+        return {"success":True,"data":{**fresh,"refresh_status":"FRESH"},"source":"short-lived terminal cache"}
+    stale=cache.get_stale("terminal-v19-dashboard")
+    if stale:
+        if force:
+            _background(_refresh_dashboard(),"refresh:dashboard")
+        status="REFRESHING_IN_BACKGROUND" if force else "STALE_SNAPSHOT"
+        return {"success":True,"data":{**stale,"refresh_status":status},
+                "source":"persisted observed snapshot"+("; background refresh started" if force else "")}
+    result=await _build_dashboard()
+    return {"success":True,"data":{**result,"refresh_status":"FRESH"},"source":"public market APIs + locally persisted public news"}
+
+
+async def _refresh_watchlist_news() -> None:
+    slots=asyncio.Semaphore(3)
+    async def one(asset: dict) -> None:
+        async with slots:
+            rows,statuses=await collect_news(asset["symbol"],asset.get("name"),limit=30)
+            if rows:
+                analyzed=build_intelligence(rows,asset["symbol"],asset.get("name"))["all_news"]
+                await asyncio.to_thread(save_news_intelligence,analyzed,asset["symbol"])
+            await asyncio.to_thread(save_provider_health,statuses)
+    await asyncio.gather(*(one(asset) for asset in list_watchlist()),return_exceptions=True)
+
+
+def _watchlist_news_payload(direction: str | None, hours: int) -> dict:
+    assets=list_watchlist();items=[];seen=set()
+    for asset in assets:
+        canonical=canonical_symbol(asset["symbol"],asset["asset_type"])
+        feed=query_news_intelligence(canonical,direction=direction,hours=hours,page_size=100)
+        for item in feed["items"]:
+            identity=item.get("id") or item.get("url") or item.get("title")
+            if identity in seen: continue
+            seen.add(identity)
+            copy=dict(item);copy["matched_watchlist_symbols"]=sorted(set(item.get("symbols",[])) &
+                {canonical,asset["symbol"]}) or [asset["symbol"]]
+            items.append(copy)
+    items.sort(key=lambda x:x.get("published_at") or x.get("collected_at") or "",reverse=True)
+    scores=[float(x.get("sentiment",{}).get("score") or 0) for x in items]
+    average=round(sum(scores)/len(scores),1) if scores else None
+    return {"items":items[:100],"total":len(items),"assets":assets,"hours":hours,
+            "radar":{"market_sentiment":average,"positive":sum(x>=10 for x in scores),
+                     "negative":sum(x<=-10 for x in scores),"neutral":sum(-10<x<10 for x in scores)},
+            "scope":"ONLY_EXPLICIT_WATCHLIST_RELATIONS",
+            "generated_at":datetime.now(timezone.utc).isoformat()}
+
+
+@router.get("/watchlist-news")
+async def watchlist_news(direction: str | None = None, hours: int = Query(default=168,ge=1,le=8760),
+                         refresh: bool = False) -> dict:
+    """Return persisted breaking news immediately; refresh providers off-path."""
+    if refresh:
+        _background(_refresh_watchlist_news(),"refresh:watchlist-news")
+    payload=await asyncio.to_thread(_watchlist_news_payload,direction,hours)
+    if not payload["items"] and hours<720:
+        payload=await asyncio.to_thread(_watchlist_news_payload,direction,720)
+        payload["fallback_window"]=True
+    payload["refresh_status"]="REFRESHING_IN_BACKGROUND" if refresh else "LOCAL_SNAPSHOT"
+    return {"success":True,"data":payload,"source":"local normalized news database + background public-provider refresh"}
+
+
+def _weighted_news_score(items: list[dict]) -> float | None:
+    now=datetime.now(timezone.utc);weighted=[]
+    for item in items:
+        try:
+            stamp=datetime.fromisoformat(str(item.get("published_at")).replace("Z","+00:00"))
+            if stamp.tzinfo is None: stamp=stamp.replace(tzinfo=timezone.utc)
+            age=max(0,(now-stamp.astimezone(timezone.utc)).total_seconds()/3600)
+        except (TypeError,ValueError): age=168
+        recency=math.exp(-age/96);impact=.5+float(item.get("impact",{}).get("score") or 0)/100
+        weighted.append((float(item.get("sentiment",{}).get("score") or 0),recency*impact))
+    total=sum(weight for _,weight in weighted)
+    return round(sum(score*weight for score,weight in weighted)/total,2) if total else None
+
+
+@router.get("/watchlist-report")
+async def watchlist_report(symbol: str, asset_type: str, name: str | None = None) -> dict:
+    """Auditable news + V5 mathematical/technical decision report for one watch asset."""
+    if asset_type not in {"stock","crypto"}: raise HTTPException(422,"asset_type 仅支持 stock 或 crypto")
+    canonical=canonical_symbol(symbol,asset_type);key=f"watch-report-v1:{asset_type}:{canonical}"
+    if saved:=cache.get(key):
+        return {"success":True,"data":{**saved,"cache_status":"FRESH"},"source":saved["data_source"]}
+    quote,candles,source=await asyncio.wait_for(_market_pair(canonical,asset_type,"1d",500),timeout=30)
+    indicators=await asyncio.to_thread(indicator_payload,candles)
+    market="Crypto" if asset_type=="crypto" else "A股" if canonical.split(".")[0].isdigit() else "美股"
+    meta={"symbol":canonical,"name":name or quote.get("name") or canonical,"asset_type":asset_type,
+          "market":market,"industry":"自选"}
+    terminal=await _compose_analysis(meta,quote,candles,source,indicators)
+    strategy=await asyncio.to_thread(StrategyEngine().analyze,candles,"1d",source)
+    feed=await asyncio.to_thread(query_news_intelligence,canonical,None,None,None,None,168,1,100)
+    if not feed["items"]:
+        feed=await asyncio.to_thread(query_news_intelligence,canonical,None,None,None,None,720,1,100)
+    news_score=_weighted_news_score(feed["items"])
+    technical_score=float(strategy["confluence"]["score"])
+    terminal_score=(float(terminal["ai_score"])-50)*2
+    if news_score is None:
+        combined=.7*technical_score+.3*terminal_score;weights={"v5_technical":.7,"terminal_factors":.3,"news":0}
+    else:
+        combined=.55*technical_score+.25*terminal_score+.20*news_score;weights={"v5_technical":.55,"terminal_factors":.25,"news":.20}
+    combined=round(max(-100,min(100,combined)),2)
+    direction="偏多" if combined>=15 else "偏空" if combined<=-15 else "中性"
+    action="做多观察" if direction=="偏多" else "看空/规避" if direction=="偏空" else "等待确认"
+    risk=dict(strategy["risk_plan"]);entry=float(risk["entry"]);atr=float(indicators["latest"].get("atr") or entry*.02)
+    # The V5 engine defaults a range to a long-side defensive line. If news
+    # fusion changes the final side to bearish, mirror risk geometry above the
+    # observed entry instead of presenting a contradictory long stop.
+    if direction=="偏空" and float(risk["stop_loss"])<entry:
+        unit=max(1.5*atr,entry*.015);risk["stop_loss"]=round(entry+unit,8)
+        risk["take_profits"]=[{"name":f"TP{i}","price":round(entry-unit*i,8),"risk_reward":float(i)} for i in (1,2,3)]
+        risk["stop_sources"]={"method":"bearish ATR geometry after news/technical fusion","atr":atr}
+    positive=sum(float(x.get("sentiment",{}).get("score") or 0)>=10 for x in feed["items"])
+    negative=sum(float(x.get("sentiment",{}).get("score") or 0)<=-10 for x in feed["items"])
+    summary=(f"最近新闻共 {len(feed['items'])} 条（利好 {positive}、利空 {negative}），"
+             f"时间衰减影响分为 {news_score if news_score is not None else '无可用方向分'}；"
+             f"V5 技术共识 {technical_score:+.2f}，综合评估 {combined:+.2f}，当前结论：{action}。")
+    signals=sorted([x for x in strategy["signals"] if x["status"]=="AVAILABLE"],
+                   key=lambda x:float(x.get("confidence") or 0),reverse=True)[:8]
+    report={"symbol":canonical,"name":meta["name"],"asset_type":asset_type,"currency":quote.get("currency"),"verdict":direction,"action":action,
+            "score":combined,"summary":summary,"news":{"items":feed["items"][:20],"count":len(feed["items"]),
+            "positive":positive,"negative":negative,"weighted_score":news_score,"window_hours":168 if feed["items"] else 720},
+            "components":{"v5_technical":technical_score,"terminal_factors":terminal_score,"news":news_score,"weights":weights},
+            "risk_plan":{**risk,"exit_line":risk["stop_loss"],"exit_rule":"日线收盘有效越过失效线，或 BOS/FVG/共识方向反转时离场"},
+            "market_regime":strategy["market_regime"],"top_signals":signals,
+            "evidence":{"bullish":strategy["evidence_chain"]["bullish"][:6],"bearish":strategy["evidence_chain"]["bearish"][:6]},
+            "model_basis":["30类V5因果技术策略","ICT/SMC + BOS/CHoCH + FVG","Fibonacci结构","ATR风险距离",
+                           "历史MFE/MAE目标触达与期望值","近期新闻时间衰减与影响分"],
+            "data_source":source,"data_cutoff":candles[-1]["timestamp"],"generated_at":datetime.now(timezone.utc).isoformat(),
+            "notice":"这是基于可观测数据的研究评估，不是收益保证；新闻规则情绪尚不是校准概率。"}
+    cache.set(key,report,300)
+    return {"success":True,"data":{**report,"cache_status":"MISS"},"source":source}
 
 
 @router.get("/model-lab")

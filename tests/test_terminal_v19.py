@@ -5,7 +5,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from backend.terminal_v19 import _market_pair, _scanner_indicator_summary, _score, parse_strategy_text
+from backend.terminal_v19 import (_market_pair, _scanner_indicator_summary, _score,
+                                  _watchlist_news_payload, _weighted_news_score,
+                                  parse_strategy_text)
 
 
 @pytest.fixture
@@ -52,3 +54,24 @@ def test_market_pair_uses_auditable_kline_fallback(monkeypatch,sample_candles):
     assert quote["price"]==sample_candles[-1]["close"]
     assert quote["currency"]=="CNY"
     assert quote["quote_status"]=="DELAYED_KLINE_FALLBACK"
+
+
+def test_watchlist_news_contains_only_explicit_relations(monkeypatch):
+    assets=[{"symbol":"BTC","name":"Bitcoin","asset_type":"crypto"},
+            {"symbol":"NVDA","name":"NVIDIA","asset_type":"stock"}]
+    monkeypatch.setattr("backend.terminal_v19.list_watchlist",lambda:assets)
+    def feed(symbol,**_kwargs):
+        return {"items":[{"id":symbol,"title":symbol,"symbols":[symbol],"published_at":"2026-01-01T00:00:00+00:00",
+                          "sentiment":{"score":20},"impact":{"score":50}}]}
+    monkeypatch.setattr("backend.terminal_v19.query_news_intelligence",feed)
+    result=_watchlist_news_payload(None,168)
+    assert result["total"]==2
+    assert result["scope"]=="ONLY_EXPLICIT_WATCHLIST_RELATIONS"
+    assert {x["matched_watchlist_symbols"][0] for x in result["items"]}=={"BTC","NVDA"}
+
+
+def test_recent_high_impact_news_receives_more_weight():
+    now=datetime.now(timezone.utc)
+    items=[{"published_at":now.isoformat(),"sentiment":{"score":60},"impact":{"score":90}},
+           {"published_at":(now-timedelta(days=20)).isoformat(),"sentiment":{"score":-60},"impact":{"score":20}}]
+    assert _weighted_news_score(items)>40

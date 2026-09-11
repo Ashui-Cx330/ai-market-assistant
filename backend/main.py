@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import math
 import os
@@ -49,6 +50,16 @@ from .performance import snapshot as performance_snapshot
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))["version"]
+_PREDICTION_SEMAPHORE = asyncio.Semaphore(1)
+
+
+def serialized_prediction(function):
+    """Prevent parallel model training from starving the desktop UI/backend."""
+    @functools.wraps(function)
+    async def wrapped(*args, **kwargs):
+        async with _PREDICTION_SEMAPHORE:
+            return await function(*args, **kwargs)
+    return wrapped
 
 
 @asynccontextmanager
@@ -399,6 +410,7 @@ async def api_crypto_kline(symbol: str, interval: str = "1h", limit: int = Query
 
 
 @app.post("/api/ai/predict")
+@serialized_prediction
 async def api_predict(body: PredictionRequest) -> dict:
     symbol = resolved_symbol(body.symbol, body.asset_type)
     # Keep enough chronological history for genuine train/calibration/test and

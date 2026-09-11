@@ -8,6 +8,7 @@ async function runCase({ currentVersion, availableVersion, savedState }) {
   const calls = { checks: 0, downloads: 0, quit: [], logs: [], writes: [] }
   const autoUpdater = new EventEmitter()
   autoUpdater.app = {}
+  autoUpdater.setFeedURL = value => { calls.feed = value }
   autoUpdater.checkForUpdates = async () => {
     calls.checks += 1
     return { updateInfo: { version: availableVersion, releaseNotes: 'test' } }
