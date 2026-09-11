@@ -11,6 +11,8 @@ import pandas as pd
 
 from .cache import cache
 from .providers import CRYPTO_NAMES, STOCKS, _eastmoney_secid, get_crypto_quote, get_stock_quote
+from .symbol_registry import schedule_refresh as schedule_symbol_refresh
+from .symbol_registry import search as registry_search
 
 HEADERS = {"User-Agent": "Mozilla/5.0 TradingAI/0.3", "Referer": "https://quote.eastmoney.com/"}
 INTERVALS = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "1h": "1H", "4h": "4H", "1d": "1D"}
@@ -24,8 +26,11 @@ def normalize_stock_symbol(symbol: str) -> str:
     return value
 
 def canonical_symbol(symbol: str, asset_type: str) -> str:
+    raw=symbol.upper().strip()
     value=normalize_crypto(symbol) if asset_type=="crypto" else normalize_stock_symbol(symbol)
     if asset_type=="crypto":return value
+    if value.isdigit() and len(value)==6 and (raw.endswith(".SH") or raw.startswith("SH")): return f"{value}.SH"
+    if value.isdigit() and len(value)==6 and (raw.endswith(".SZ") or raw.startswith("SZ")): return f"{value}.SZ"
     if value.isdigit() and len(value)==6:return f"{value}.{'SH' if value.startswith(('5','6','9')) else 'SZ'}"
     return value
 
@@ -39,6 +44,11 @@ def normalize_crypto(symbol: str) -> str:
 async def stock_search(query: str) -> list[dict]:
     key = f"stock-search:{query.lower()}"
     if cached := cache.get(key): return cached
+    # Search is a local metadata operation. Quotes and K-lines are deliberately
+    # fetched only after the user chooses an instrument.
+    local = await asyncio.to_thread(registry_search, query, "stock", 15)
+    schedule_symbol_refresh()
+    if local: return cache.set(key, local, 300)
     async with httpx.AsyncClient(timeout=8, headers=HEADERS) as client:
         if re.search(r"[A-Za-z]",query):
             try:
@@ -67,6 +77,9 @@ async def crypto_search(query: str) -> list[dict]:
     q = normalize_crypto(query)
     key = f"crypto-search:{q}"
     if cached := cache.get(key): return cached
+    local = await asyncio.to_thread(registry_search, query, "crypto", 20)
+    schedule_symbol_refresh()
+    if local: return cache.set(key, local, 3600)
     popular = set(CRYPTO_NAMES) | {"DOGE", "XRP", "ADA", "AVAX", "DOT", "LINK", "LTC", "TRX"}
     results = [{"symbol": s, "pair": f"{s}/USDT", "name": CRYPTO_NAMES.get(s, s), "asset_type": "crypto", "source": "OKX instruments"}
                for s in sorted(popular) if not q or q in s]
@@ -83,8 +96,9 @@ async def crypto_search(query: str) -> list[dict]:
 
 
 async def stock_quote(symbol: str, force_refresh: bool = False) -> dict:
+    requested_symbol=symbol
     symbol=normalize_stock_symbol(symbol)
-    key = f"stock-quote:{symbol}"
+    key = f"stock-quote:{_eastmoney_secid(requested_symbol)}" if symbol.isdigit() else f"stock-quote:{symbol}"
     if not force_refresh and (cached := cache.get(key)): return cached
     async with httpx.AsyncClient(timeout=8, headers=HEADERS, follow_redirects=True) as client:
         if _us_stock(symbol):
@@ -95,7 +109,7 @@ async def stock_quote(symbol: str, force_refresh: bool = False) -> dict:
             return cache.set(key,result,8)
         try:
             response = await client.get("https://push2.eastmoney.com/api/qt/stock/get",
-                params={"secid": _eastmoney_secid(symbol), "fields": "f43,f44,f45,f46,f47,f48,f57,f58,f60,f169,f170"})
+                params={"secid": _eastmoney_secid(requested_symbol), "fields": "f43,f44,f45,f46,f47,f48,f57,f58,f60,f169,f170"})
             response.raise_for_status(); data = response.json().get("data")
             if not data or data.get("f43") in (None, "-"): raise ValueError("空行情")
             result = {"symbol": data["f57"], "name": data["f58"], "asset_type": "stock", "currency": "CNY",
@@ -105,9 +119,9 @@ async def stock_quote(symbol: str, force_refresh: bool = False) -> dict:
                       "source": "东方财富公开接口", "updated_at": datetime.now(timezone.utc).isoformat()}
             return cache.set(key, result, 8)
         except Exception:
-            basic = await get_stock_quote(client, symbol)
+            basic = await get_stock_quote(client, requested_symbol)
             if not basic.available: raise RuntimeError(basic.message)
-            market = "sh" if symbol.startswith(("5", "6", "9")) else "sz"
+            market = "sh" if _eastmoney_secid(requested_symbol).startswith("1.") else "sz"
             response = await client.get(f"https://qt.gtimg.cn/q={market}{symbol}")
             values = response.content.decode("gbk", errors="replace").split('"', 1)[1].rsplit('"', 1)[0].split("~")
             result = {"symbol": symbol, "name": values[1], "asset_type": "stock", "currency": "CNY",
@@ -149,7 +163,8 @@ async def crypto_quote(symbol: str, force_refresh: bool = False) -> dict:
 
 async def cross_validate_quote(symbol: str, asset_type: str) -> dict:
     """Read two independent public quote endpoints; never substitute a value."""
-    symbol=normalize_crypto(symbol) if asset_type=="crypto" else symbol
+    requested_symbol=symbol
+    symbol=normalize_crypto(symbol) if asset_type=="crypto" else normalize_stock_symbol(symbol)
     values={};errors=[]
     async with httpx.AsyncClient(timeout=10,headers=HEADERS,follow_redirects=True) as client:
         if asset_type=="crypto":
@@ -163,11 +178,11 @@ async def cross_validate_quote(symbol: str, asset_type: str) -> dict:
             except Exception as exc:errors.append(f"Coinbase:{type(exc).__name__}")
         else:
             try:
-                response=await client.get("https://push2.eastmoney.com/api/qt/stock/get",params={"secid":_eastmoney_secid(symbol),"fields":"f43"});response.raise_for_status()
+                response=await client.get("https://push2.eastmoney.com/api/qt/stock/get",params={"secid":_eastmoney_secid(requested_symbol),"fields":"f43"});response.raise_for_status()
                 values["Eastmoney"]=float(response.json()["data"]["f43"])/100
             except Exception as exc:errors.append(f"Eastmoney:{type(exc).__name__}")
             try:
-                market="sh" if symbol.startswith(("5","6","9")) else "sz";response=await client.get(f"https://qt.gtimg.cn/q={market}{symbol}")
+                market="sh" if _eastmoney_secid(requested_symbol).startswith("1.") else "sz";response=await client.get(f"https://qt.gtimg.cn/q={market}{symbol}")
                 values["Tencent"]=float(response.content.decode("gbk",errors="replace").split('"',1)[1].split("~")[3])
             except Exception as exc:errors.append(f"Tencent:{type(exc).__name__}")
     if len(values)<2:return {"status":"PARTIAL_DATA" if values else "NO_DATA","source":"independent public quote endpoints","values":values,"errors":errors,"conflict":False}
@@ -187,10 +202,21 @@ def _aggregate(candles: list[dict], rule: str) -> list[dict]:
             for idx,row in out.iterrows()]
 
 
+def _parse_tencent_daily_rows(rows: list) -> list[dict]:
+    candles=[]
+    for item in rows:
+        v=item.split() if isinstance(item,str) else item
+        if not isinstance(v,(list,tuple)) or len(v)<6: continue
+        candles.append({"timestamp":v[0],"open":float(v[1]),"close":float(v[2]),
+                        "high":float(v[3]),"low":float(v[4]),"volume":float(v[5]),"amount":0.0})
+    return candles
+
+
 async def stock_kline(symbol: str, interval: str, limit: int = 400, force_refresh: bool = False) -> tuple[list[dict], str]:
+    requested_symbol=symbol
     symbol=normalize_stock_symbol(symbol)
     if interval == "1w":
-        daily, source = await stock_kline(symbol, "1d", min(5000, max(400, limit * 7)), force_refresh)
+        daily, source = await stock_kline(requested_symbol, "1d", min(5000, max(400, limit * 7)), force_refresh)
         weekly=_aggregate(daily, "W-FRI")[-limit:]
         if weekly: weekly[-1]["timestamp"]=daily[-1]["timestamp"]
         return weekly, f"{source} · weekly aggregation"
@@ -210,18 +236,19 @@ async def stock_kline(symbol: str, interval: str, limit: int = 400, force_refres
             return cache.set(key,(candles[-limit:],"Yahoo Finance public chart API"),20 if interval!="1d" else 300)
     requested = interval; source_interval = "1h" if interval == "4h" else interval
     if source_interval not in STOCK_KLT: raise ValueError("A股支持 1m/5m/15m/30m/1h/4h/1d")
-    key=f"stock-kline:{symbol}:{interval}:{limit}"
+    stock_cache_symbol=_eastmoney_secid(requested_symbol) if symbol.isdigit() else symbol
+    key=f"stock-kline:{stock_cache_symbol}:{interval}:{limit}"
     if not force_refresh:
         if cached:=cache.get(key): return cached
         for larger in (1200,2500):
-            if limit<larger and (cached:=cache.get(f"stock-kline:{symbol}:{interval}:{larger}")):
+            if limit<larger and (cached:=cache.get(f"stock-kline:{stock_cache_symbol}:{interval}:{larger}")):
                 return cached[0][-limit:],cached[1]
     days = 1200 if source_interval == "1d" else 40
     beg=(datetime.now()-timedelta(days=days)).strftime("%Y%m%d")
     async with httpx.AsyncClient(timeout=15,headers=HEADERS,follow_redirects=True) as client:
         errors=[]
         try:
-            response=await client.get("https://push2his.eastmoney.com/api/qt/stock/kline/get",params={"secid":_eastmoney_secid(symbol),"klt":STOCK_KLT[source_interval],"fqt":1,"beg":beg,"end":"20500101","lmt":max(limit,500),"fields1":"f1,f2,f3,f4,f5,f6","fields2":"f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"})
+            response=await client.get("https://push2his.eastmoney.com/api/qt/stock/kline/get",params={"secid":_eastmoney_secid(requested_symbol),"klt":STOCK_KLT[source_interval],"fqt":1,"beg":beg,"end":"20500101","lmt":max(limit,500),"fields1":"f1,f2,f3,f4,f5,f6","fields2":"f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"})
             response.raise_for_status(); data=response.json().get("data"); rows=data.get("klines",[]) if data else []
             if not rows: raise ValueError("空 K线")
             candles=[]
@@ -234,7 +261,7 @@ async def stock_kline(symbol: str, interval: str, limit: int = 400, force_refres
         # returns exchange observations (not reconstructed or generated bars).
         if source_interval in {"5m", "15m", "30m", "1h"}:
             try:
-                market="sh" if symbol.startswith(("5","6","9")) else "sz"
+                market="sh" if _eastmoney_secid(requested_symbol).startswith("1.") else "sz"
                 scale={"5m":5,"15m":15,"30m":30,"1h":60}[source_interval]
                 response=await client.get(
                     f"https://quotes.sina.cn/cn/api/jsonp_v2.php/var%20_{market}{symbol}_{scale}_=/CN_MarketDataService.getKLineData",
@@ -252,10 +279,18 @@ async def stock_kline(symbol: str, interval: str, limit: int = 400, force_refres
             except Exception as exc: errors.append(f"新浪财经:{type(exc).__name__}:{str(exc)[:120]}")
         if interval=="1d":
             try:
-                market="sh" if symbol.startswith(("5","6","9")) else "sz"
-                response=await client.get("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",params={"param":f"{market}{symbol},day,,,{limit},qfq"}); response.raise_for_status()
-                node=response.json()["data"][f"{market}{symbol}"]; rows=node.get("qfqday") or node.get("day") or []
-                candles=[{"timestamp":v[0],"open":float(v[1]),"close":float(v[2]),"high":float(v[3]),"low":float(v[4]),"volume":float(v[5]),"amount":0.0} for v in rows]
+                market="sh" if _eastmoney_secid(requested_symbol).startswith("1.") else "sz"
+                # The public endpoint returns an error-shaped list for very
+                # large limits. Its current usable history is ~640-800 rows,
+                # already sufficient for the causal model's minimum sample.
+                tencent_limit=min(limit,1200)
+                response=await client.get("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",params={"param":f"{market}{symbol},day,,,{tencent_limit},qfq"}); response.raise_for_status()
+                payload=response.json(); data_node=payload.get("data")
+                if not isinstance(data_node,dict): raise ValueError("腾讯证券返回结构异常")
+                node=data_node.get(f"{market}{symbol}") or {}; rows=node.get("qfqday") or node.get("day") or []
+                # Tencent currently returns space-delimited strings, while
+                # older mirrors returned arrays. Accept both real formats.
+                candles=_parse_tencent_daily_rows(rows)
                 if candles:return cache.set(key,(candles[-limit:],"腾讯证券历史行情（备用）"),300)
             except Exception as exc: errors.append(f"腾讯证券:{type(exc).__name__}:{str(exc)[:120]}")
         raise RuntimeError("K线数据获取失败（"+"；".join(errors)+"）")

@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -33,9 +34,25 @@ class ModelManager:
 
     @staticmethod
     def _replace_cross_volume_safe(source: Path, target: Path) -> None:
-        try:
-            os.replace(source, target)
-        except OSError as exc:
+        error: OSError | None = None
+        for attempt in range(6):
+            try:
+                os.replace(source, target)
+                return
+            except PermissionError as exc:
+                # Windows Search/Defender and a just-closed model reader can
+                # retain a very short sharing lock. The source is still intact,
+                # so bounded retry is safe and remains atomic when it succeeds.
+                error=exc
+                if attempt < 5:
+                    time.sleep(.025 * (attempt + 1))
+                    continue
+                raise
+            except OSError as exc:
+                error=exc
+                break
+        if error is not None:
+            exc=error
             # Some Windows roaming-profile/reparse configurations report
             # ERROR_NOT_SAME_DEVICE even for visually identical AppData paths.
             # Copying remains valid across volumes; the existing .previous

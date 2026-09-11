@@ -347,10 +347,14 @@ def model_lab(symbol: str | None = None) -> dict:
         live.setdefault(row["symbol"],[]).append({"horizon":row["horizon"],"samples":row["samples"],"accuracy":round(float(row["accuracy"])*100,2) if row["accuracy"] is not None else None,
                                                   "mae":round(float(row["mae"])*100,3) if row["mae"] is not None else None,"source":"local resolved prediction history"})
     audited_nvda=[
-        {"horizon":"T+1","accuracy":39.47,"baseline":None,"edge":None,"assessment":"NO_EDGE","note":"未超过多数类基线；原审计未提供可复核基线数值"},
-        {"horizon":"T+5","accuracy":50.26,"baseline":48.15,"edge":2.11,"assessment":"WEAK_EDGE"},
-        {"horizon":"T+20","accuracy":62.23,"baseline":54.79,"edge":7.44,"assessment":"BETTER_HISTORICAL_EDGE"},
+        {"horizon":"T+1","accuracy":39.47,"baseline":None,"edge":None,"assessment":"NO_EDGE","evidence_level":"D — Experimental / No statistical edge","note":"未超过多数类基线；原审计未提供可复核基线数值"},
+        {"horizon":"T+5","accuracy":50.26,"baseline":48.15,"edge":2.11,"assessment":"WEAK_EDGE","evidence_level":"C — Weak historical evidence","note":"缺少逐样本预测和置信区间，不能证明稳定统计优势"},
+        {"horizon":"T+20","accuracy":62.23,"baseline":54.79,"edge":7.44,"assessment":"BETTER_HISTORICAL_EDGE","evidence_level":"C — Historical edge, significance unverified","note":"历史点估计较好，但缺少原始样本、Bootstrap CI 与校准曲线，不能升级为强证据"},
     ]
+    for period in audited_nvda:
+        period.update({"balanced_accuracy":None,"precision":None,"recall":None,"f1":None,
+                       "directional_accuracy":period["accuracy"],"brier_score":None,"log_loss":None,
+                       "calibration":None,"confidence_interval_95":None})
     assets=[]
     for name in ("NVDA","AAPL","TSLA","BTC"):
         periods=audited_nvda if name=="NVDA" else []

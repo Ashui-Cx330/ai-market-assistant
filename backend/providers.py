@@ -85,19 +85,25 @@ async def get_crypto_quote(client: httpx.AsyncClient, symbol: str) -> Quote:
 
 
 def _eastmoney_secid(symbol: str) -> str:
-    if symbol.startswith(("5", "6", "9")) or symbol == "000001":
-        return f"1.{symbol}"
-    return f"0.{symbol}"
+    raw=symbol.upper().strip()
+    explicit_sh=raw.endswith(".SH") or raw.startswith("SH")
+    explicit_sz=raw.endswith(".SZ") or raw.startswith("SZ")
+    code=raw.replace(".SH","").replace(".SZ","")
+    if code.startswith(("SH","SZ")): code=code[2:]
+    is_sh=explicit_sh or (not explicit_sz and code.startswith(("5","6","9")))
+    return f"{'1' if is_sh else '0'}.{code}"
 
 
 async def get_stock_quote(client: httpx.AsyncClient, symbol: str) -> Quote:
-    symbol = symbol.strip()
+    raw_symbol=symbol.strip()
+    symbol=raw_symbol.upper().replace(".SH","").replace(".SZ","")
+    if symbol.startswith(("SH","SZ")) and len(symbol)==8: symbol=symbol[2:]
     name, kind = STOCKS.get(symbol, (symbol, "stock"))
     errors = []
     try:
         response = await client.get(
             "https://push2.eastmoney.com/api/qt/stock/get",
-            params={"secid": _eastmoney_secid(symbol), "fields": "f43,f57,f58,f116,f169,f170"},
+            params={"secid": _eastmoney_secid(raw_symbol), "fields": "f43,f57,f58,f116,f169,f170"},
         )
         response.raise_for_status()
         data = response.json().get("data")
@@ -109,7 +115,7 @@ async def get_stock_quote(client: httpx.AsyncClient, symbol: str) -> Quote:
         errors.append(f"东方财富: {type(exc).__name__}")
 
     try:
-        market = "sh" if symbol.startswith(("5", "6", "9")) or symbol == "000001" else "sz"
+        market = "sh" if _eastmoney_secid(raw_symbol).startswith("1.") else "sz"
         response = await client.get(f"https://qt.gtimg.cn/q={market}{symbol}")
         response.raise_for_status()
         text = response.content.decode("gbk", errors="replace")

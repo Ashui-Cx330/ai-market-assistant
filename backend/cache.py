@@ -30,6 +30,14 @@ class TTLCache:
                     return value
                 self._items.pop(key, None)
             now = time.time()
+            # The cache is disposable. Tests, cleanup tools, or users may remove
+            # it while the process is alive; recreate it instead of breaking
+            # market/search requests with "unable to open database file".
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            if not self._path.exists():
+                with closing(sqlite3.connect(self._path)) as connection:
+                    connection.execute("CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, expires REAL NOT NULL, value TEXT NOT NULL)")
+                    connection.commit()
             with closing(sqlite3.connect(self._path)) as connection:
                 row = connection.execute("SELECT expires,value FROM cache WHERE key=?", (key,)).fetchone()
                 if not row:
@@ -47,8 +55,10 @@ class TTLCache:
         with self._lock:
             self._items[key] = (time.monotonic() + ttl, value)
             try:
+                self._path.parent.mkdir(parents=True, exist_ok=True)
                 encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
                 with closing(sqlite3.connect(self._path)) as connection:
+                    connection.execute("CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, expires REAL NOT NULL, value TEXT NOT NULL)")
                     connection.execute("INSERT INTO cache(key,expires,value) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET expires=excluded.expires,value=excluded.value",
                                        (key, time.time() + ttl, encoded))
                     connection.commit()

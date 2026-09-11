@@ -4,6 +4,8 @@ import asyncio
 import json
 import math
 import os
+import time
+import uuid
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -39,6 +41,11 @@ from .strategy_engine import (SIGNAL_KEYS, StrategyEngine, strategy_backtest,
 from .realtime import realtime_manager, utc_now
 from .news_intelligence import build_intelligence, collect_historical_news, collect_news, event_backtest
 from .terminal_v19 import router as terminal_v19_router
+from .symbol_registry import schedule_refresh as schedule_symbol_refresh
+from .symbol_registry import status as symbol_registry_status
+from .symbol_registry import ensure_seeded as ensure_symbol_registry_seeded
+from .performance import record as record_performance
+from .performance import snapshot as performance_snapshot
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))["version"]
@@ -47,10 +54,15 @@ VERSION = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))["versi
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    await asyncio.to_thread(ensure_symbol_registry_seeded)
     await realtime_manager.start()
+    symbol_refresh_task = schedule_symbol_refresh()
     try:
         yield
     finally:
+        if symbol_refresh_task and not symbol_refresh_task.done():
+            symbol_refresh_task.cancel()
+            await asyncio.gather(symbol_refresh_task,return_exceptions=True)
         await realtime_manager.stop()
 
 
@@ -58,6 +70,21 @@ app = FastAPI(title="AI行情助手", version=VERSION, docs_url="/api/docs", lif
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
                    allow_methods=["*"], allow_headers=["*"])
 app.include_router(terminal_v19_router)
+
+
+@app.middleware("http")
+async def timing_middleware(request: Request, call_next):
+    started=time.perf_counter();request_id=uuid.uuid4().hex[:12]
+    try:
+        response=await call_next(request)
+    except Exception:
+        record_performance(request.url.path,request.method,503,(time.perf_counter()-started)*1000)
+        raise
+    elapsed=(time.perf_counter()-started)*1000
+    record_performance(request.url.path,request.method,response.status_code,elapsed)
+    response.headers["Server-Timing"]=f'app;dur={elapsed:.2f}'
+    response.headers["X-Request-ID"]=request_id
+    return response
 
 
 def ok(data=None, message="成功", source=None) -> dict:
@@ -299,7 +326,7 @@ async def realtime_websocket(websocket: WebSocket) -> None:
 
 @app.get("/api/market/overview")
 async def market_overview() -> dict:
-    indices = [("000001", "stock"), ("399001", "stock"), ("399006", "stock")]
+    indices = [("000001.SH", "stock"), ("399001.SZ", "stock"), ("399006.SZ", "stock")]
     watch = [(row["symbol"], row["asset_type"]) for row in list_watchlist()]
     quotes = await fetch_quotes(list(dict.fromkeys(indices + watch)))
     return {"items": quotes, "notice": "行情仅供分析研究，不构成投资建议。数据源异常时不会生成替代数据。"}
@@ -333,6 +360,16 @@ async def api_stock_search(q: str = Query(min_length=1)) -> dict: return ok(awai
 
 @app.get("/api/market/crypto/search")
 async def api_crypto_search(q: str = Query(min_length=1)) -> dict: return ok(await crypto_search(q))
+
+
+@app.get("/api/market/symbol-registry/status")
+def api_symbol_registry_status() -> dict:
+    return ok(symbol_registry_status(), source="local persistent symbol registry")
+
+
+@app.get("/api/performance/recent")
+def api_performance_recent(limit: int = Query(default=100, ge=1, le=500)) -> dict:
+    return ok(performance_snapshot(limit), source="in-process performance ring buffer")
 
 
 @app.get("/api/market/stock/quote")
