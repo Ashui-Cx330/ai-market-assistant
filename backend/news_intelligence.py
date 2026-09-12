@@ -12,7 +12,15 @@ from xml.etree import ElementTree as ET
 import httpx
 
 HEADERS={"User-Agent":"Mozilla/5.0 AI-Market-Assistant/1.7","Accept":"application/json, application/rss+xml, application/xml, */*"}
-ANALYSIS_VERSION="financial-event-rules-v2"
+ANALYSIS_VERSION="financial-event-rules-v3"
+SOURCE_REGISTRY=(
+ {"provider":"EastmoneyAnnouncementProvider","source":"交易所公告聚合","domain":"eastmoney.com","type":"official_announcement","reliability":.92,"language":"zh-CN","market":["A股"],"enabled":True,"priority":1},
+ {"provider":"CoinDeskProvider","source":"CoinDesk","domain":"coindesk.com","type":"financial_media","reliability":.78,"language":"en","market":["加密货币"],"enabled":True,"priority":2},
+ {"provider":"CointelegraphProvider","source":"Cointelegraph","domain":"cointelegraph.com","type":"financial_media","reliability":.68,"language":"en","market":["加密货币"],"enabled":True,"priority":2},
+ {"provider":"CNBCMarketsProvider","source":"CNBC Markets","domain":"cnbc.com","type":"financial_media","reliability":.82,"language":"en","market":["美股"],"enabled":True,"priority":2},
+ {"provider":"BBCBusinessProvider","source":"BBC Business","domain":"bbc.co.uk","type":"financial_media","reliability":.84,"language":"en","market":["全球"],"enabled":True,"priority":2},
+ {"provider":"YahooFinanceProvider","source":"Yahoo Finance","domain":"finance.yahoo.com","type":"aggregator","reliability":.70,"language":"en","market":["美股"],"enabled":True,"priority":2})
+SOURCE_BY_PROVIDER={x["provider"]:x for x in SOURCE_REGISTRY}
 
 def now_utc(): return datetime.now(timezone.utc).isoformat()
 def _published(value:Any):
@@ -28,6 +36,14 @@ def _published(value:Any):
         except (TypeError,ValueError):return None
 def _plain(value:Any,limit=400):return re.sub(r"\s+"," ",html.unescape(re.sub(r"<[^>]+>"," ",str(value or "")))).strip()[:limit]
 def _identity(title,url):return hashlib.sha256(f"{title}|{url}".encode()).hexdigest()[:24]
+def _fingerprint(title,summary=""):
+    normalized=re.sub(r"[^a-z0-9\u4e00-\u9fff]+","",f"{title} {summary}".lower())
+    return hashlib.sha256(normalized.encode()).hexdigest()
+def _freshness(published_at):
+    stamp=_published(published_at)
+    if not stamp:return {"label":"Unknown","age_minutes":None}
+    age=max(0,(datetime.now(timezone.utc)-datetime.fromisoformat(stamp.replace("Z","+00:00"))).total_seconds()/60)
+    return {"label":"Breaking" if age<=30 else "Recent" if age<=360 else "Aging" if age<=1440 else "Old","age_minutes":round(age,1)}
 def _valid(text):return bool(text.strip()) and text.count("�")<=max(1,len(text)//30)
 
 @dataclass(slots=True)
@@ -52,10 +68,10 @@ class NewsProvider(ABC):
     async def searchNews(self,q):return await self.search_news(q)
 
 ENTITY_ALIASES={
- "600519":("600519","贵州茅台","茅台"),"300750":("300750","宁德时代"),"002594":("002594","比亚迪"),"000858":("000858","五粮液"),
+ "600519":("600519","贵州茅台","茅台"),"000001":("000001","平安银行"),"300750":("300750","宁德时代"),"002594":("002594","比亚迪"),"000858":("000858","五粮液"),
  "NVDA":("nvda","nvidia","英伟达"),"AMD":("amd","advanced micro devices","超威"),"TSLA":("tsla","tesla","特斯拉"),
  "AAPL":("aapl","apple","苹果公司"),"MSFT":("msft","microsoft","微软"),"GOOGL":("googl","google","alphabet","谷歌"),
- "BTC":("btc","bitcoin","比特币"),"ETH":("eth","ethereum","以太坊"),"SOL":("solana",),"BNB":("bnb","binance coin")}
+ "BTC":("btc","bitcoin","比特币"),"ETH":("eth","ethereum","以太坊"),"SOL":("sol","solana"),"BNB":("bnb","binance coin")}
 
 def _filter(rows,q):
     needle=(q.keyword or q.sector or "").strip().lower()
@@ -135,16 +151,29 @@ async def _collect(q,historical=False):
         if isinstance(r,BaseException):status.append({"provider":p.provider_type,"status":"ERROR","count":0,"latency_ms":round((time.perf_counter()-started)*1000),"error":type(r).__name__,"markets":p.markets})
         else:rows.extend(r);status.append({"provider":p.provider_type,"status":"HEALTHY","count":len(r),"latency_ms":round((time.perf_counter()-started)*1000),"error":None,"markets":p.markets})
     return _dedupe(rows),status
-async def collect_news(symbol=None,name=None,market=None,keyword=None,limit=30):return await _collect(NewsQuery(symbol,name,keyword=keyword,market=market,limit=limit))
+def _provider_symbol(symbol):return re.sub(r"\.(SH|SZ)$","",str(symbol or "").upper()) or None
+async def collect_news(symbol=None,name=None,market=None,keyword=None,limit=30):return await _collect(NewsQuery(_provider_symbol(symbol),name,keyword=keyword,market=market,limit=limit))
 async def collect_historical_news(symbol,name=None,limit=100,pages=3):
+    symbol=_provider_symbol(symbol)
     rows=[];statuses=[]
     for page in range(1,pages+1):
         got,health=await _collect(NewsQuery(symbol=symbol,name=name,limit=min(100,limit),page=page),True);rows+=got;statuses+=health
         if len(got)<min(100,limit):break
     return _dedupe(rows),statuses
 
-SECTOR_RULES={"半导体":("芯片","半导体","semiconductor","gpu","晶圆"),"AI算力":("人工智能"," ai ","artificial intelligence","算力","服务器","data center"),"新能源":("锂电","电池","光伏","风电","electric vehicle"),"消费":("白酒","消费","零售"),"金融":("银行","券商","保险","利率","bank"),"数字资产":("比特币","btc","bitcoin","以太坊","eth","ethereum","加密","crypto"),"黄金":("黄金","gold"),"原油":("原油","oil","opec")}
-CATEGORY_RULES={"财报":("财报","业绩","earnings","revenue","profit"),"公告":("公告","回购","增持","减持","分红","停牌"),"政策":("政策","监管","法案","禁令","regulation","tariff"),"宏观":("美联储","降息","加息","cpi","gdp","非农","inflation"),"行业":("行业","产业","供需","芯片","半导体"),"地缘政治":("战争","冲突","制裁","war","sanction")}
+SECTOR_RULES={"半导体":("芯片","半导体","semiconductor","gpu","晶圆"),"AI算力":("人工智能"," ai ","artificial intelligence","算力","服务器","data center"),"新能源":("锂电","电池","光伏","风电","electric vehicle"),"消费":("白酒","消费","零售"),"金融":("银行","券商","保险","利率","bank"),"数字资产":("比特币","btc","bitcoin","以太坊","eth","ethereum","solana","加密","crypto"),"黄金":("黄金","gold"),"原油":("原油","oil","opec")}
+EVENT_RULES={
+ "Earnings":("财报","业绩","earnings","revenue","profit"),"Guidance":("指引","guidance","outlook"),"Product":("新品","发布产品","new product","launches"),
+ "M&A":("收购","并购","merger","acquisition"),"Regulation":("监管","sec ","regulation","antitrust"),"Government Policy":("政策","法案","government policy","tariff"),
+ "Interest Rate":("美联储","降息","加息","interest rate","fed "),"Inflation":("cpi","通胀","inflation"),"Employment":("非农","失业率","employment","payroll"),
+ "Geopolitics":("战争","冲突","制裁","war","sanction"),"Legal":("诉讼","法院","lawsuit","court"),"Supply Chain":("供应链","短缺","supply chain","shortage"),
+ "Management":("董事长","高管","ceo","management"),"Capital Flow":("资金流","净流入","capital flow","inflow","outflow"),"ETF":("etf",),"Listing":("上市","listing"),"Delisting":("退市","delisting"),
+ "Token Unlock":("代币解锁","token unlock","unlock"),"Protocol Upgrade":("协议升级","硬分叉","protocol upgrade","hard fork"),"Hack":("黑客","被盗","hack","exploit"),
+ "Security Incident":("安全事件","security incident","breach"),"Partnership":("合作","partnership"),"Funding":("融资","funding","financing"),"Whale Activity":("巨鲸","whale transfer","whale activity"),
+ "ETF Flow":("etf flow","etf inflow","etf outflow"),"Exchange Listing":("交易所上线","exchange listing"),"Exchange Delisting":("交易所下架","exchange delisting"),
+ "On-chain Activity":("链上","on-chain","onchain"),"Stablecoin Event":("稳定币","stablecoin")}
+CATEGORY_MAP={"Earnings":"财报","Guidance":"财报","Product":"公司","M&A":"公司","Regulation":"政策","Government Policy":"政策","Interest Rate":"宏观","Inflation":"宏观","Employment":"宏观","Geopolitics":"地缘政治","Legal":"法律","Supply Chain":"行业","Management":"公司","Capital Flow":"资金","ETF":"资金","Listing":"市场","Delisting":"市场","Token Unlock":"加密事件","Protocol Upgrade":"加密事件","Hack":"安全","Security Incident":"安全","Partnership":"公司","Funding":"资金","Whale Activity":"链上","ETF Flow":"资金","Exchange Listing":"加密事件","Exchange Delisting":"加密事件","On-chain Activity":"链上","Stablecoin Event":"加密事件"}
+CATEGORY_RULES={category:tuple(word for event,words in EVENT_RULES.items() if CATEGORY_MAP.get(event)==category for word in words) for category in set(CATEGORY_MAP.values())}
 POSITIVE={"大增":32,"超预期":30,"获批":28,"回购":23,"增持":20,"重大合同":23,"突破":18,"增长":14,"上涨":12,"降息":16,"创新高":18,"改善":12,"利好":18,"beats":28,"surge":22,"rally":16,"approval":20,"record high":18}
 NEGATIVE={"暴跌":-35,"处罚":-30,"调查":-25,"违约":-35,"爆雷":-38,"亏损":-22,"减持":-18,"下调":-16,"下跌":-12,"加息":-16,"限制":-20,"风险":-12,"召回":-22,"misses":-28,"plunge":-30,"lawsuit":-22,"ban":-25}
 
@@ -154,16 +183,17 @@ class EventExtractionEngine:
         if item.get("analysis_version")==ANALYSIS_VERSION and item.get("event"):return item
         title=_plain(item.get("title"),240);summary=_plain(item.get("summary") or item.get("raw_summary") or title,420);text=f" {title} {summary} ".lower()
         contrib=[(w,s) for w,s in {**POSITIVE,**NEGATIVE}.items() if w in text];score=max(-100,min(100,sum(s for _,s in contrib)))
-        category=next((c for c,ws in CATEGORY_RULES.items() if any(w in text for w in ws)),"市场")
+        event_type=next((kind for kind,ws in EVENT_RULES.items() if any(w in text for w in ws)),"General Market News")
+        category=CATEGORY_MAP.get(event_type,"市场")
         sectors=sorted(set(item.get("sectors",[]))|{s for s,ws in SECTOR_RULES.items() if any(w in text for w in ws)})
         symbols={str(x).upper() for x in item.get("symbols",[]) if x}
         for code,aliases in ENTITY_ALIASES.items():
             if any(a.lower() in text for a in aliases if a):symbols.add(code)
         if symbol:
-            aliases=ENTITY_ALIASES.get(symbol.upper(),(symbol,name or ""))
-            if symbol in item.get("symbols",[]) or any(a and a.lower() in text for a in aliases):symbols.add(symbol.upper())
+            base=_provider_symbol(symbol);aliases=ENTITY_ALIASES.get(base,(base,name or ""))
+            if base in item.get("symbols",[]) or any(a and a.lower() in text for a in aliases):symbols.add(symbol.upper())
         symbols=sorted(symbols);direction="强利好" if score>=45 else "利好" if score>=10 else "强利空" if score<=-45 else "利空" if score<=-10 else "中性";label="bullish" if score>=10 else "bearish" if score<=-10 else "neutral"
-        event_type=contrib[0][0] if contrib else next((w for ws in CATEGORY_RULES.values() for w in ws if w in text),"一般资讯");confidence=min(.95,.45+.08*len(contrib)+(.1 if item.get("published_at") else 0)+(.08 if symbols else 0));magnitude=min(5,max(1,math.ceil(abs(score)/20))) if score else 1
+        confidence=min(.95,.45+.08*len(contrib)+(.1 if item.get("published_at") else 0)+(.08 if symbols else 0));magnitude=min(5,max(1,math.ceil(abs(score)/20))) if score else 1
         reasons=[f"识别到方向词“{w}”（权重 {s:+d}）" for w,s in contrib]
         if symbols:reasons.append(f"标题、摘要或公告元数据明确提及：{'、'.join(symbols)}")
         if sectors:reasons.append(f"行业关键词映射到：{'、'.join(sectors)}")
@@ -171,8 +201,14 @@ class EventExtractionEngine:
         direct=[{"target":x,"direction":direction,"score":abs(score),"reason":"新闻明确提及该标的"} for x in symbols];indirect=[{"target":x,"direction":direction if score else "中性","score":max(5,abs(score)-10),"reason":f"事件与{x}产业链相关"} for x in sectors];risk=[]
         if score>=20:risk=[{"target":"高估值/近期涨幅较大标的","direction":"潜在利空","reason":"正面信息可能已被提前定价，存在利好兑现风险"}]
         if score<=-20:risk=[{"target":"替代供应商或避险资产","direction":"潜在利好","reason":"负面冲击可能带来替代或避险需求"}]
-        impact=min(100,round(abs(score)*.58+magnitude*7+len(symbols)*5+len(sectors)*4+(6 if item.get("scope")=="macro" else 0)))
-        return {**item,"summary":summary,"one_sentence_summary":summary or title,"category":category,"analysis_version":ANALYSIS_VERSION,"analysis_status":"RULE_ENGINE_ANALYZED","symbols":symbols,"sectors":sectors,"reason":reasons,"event":{"subject":symbols[0] if symbols else (sectors[0] if sectors else "市场"),"event_type":event_type,"event_time":item.get("published_at"),"direction":direction,"sentiment":label,"affected_objects":symbols,"affected_symbols":symbols,"affected_sectors":sectors,"magnitude":magnitude,"confidence":round(confidence,2)},"sentiment":{"score":score,"direction":direction,"label":label,"method":self.method,"evidence":[{"keyword":w,"weight":s} for w,s in contrib]},"impact":{"score":impact,"level":"极高" if impact>=80 else "高" if impact>=60 else "中" if impact>=35 else "低","primary":direct,"secondary":indirect,"counter":risk,"method":"deterministic entity and causal mapping; requires human review"}}
+        registry=SOURCE_BY_PROVIDER.get(str(item.get("provider")),{})
+        components={"source_reliability":round(float(registry.get("reliability",.55))*100,1),"event_severity":round(magnitude*20,1),
+                    "asset_relevance":90.0 if direct else 58.0 if indirect else 25.0,"novelty":max(20.0,100.0-18.0*max(0,len(item.get("related_sources",[]))-1)),
+                    "market_sensitivity":85.0 if event_type in {"Regulation","Interest Rate","Inflation","Geopolitics","Hack","Security Incident","Token Unlock"} else 62.0,
+                    "historical_similarity":50.0,"market_regime":50.0}
+        weights={"source_reliability":.18,"event_severity":.20,"asset_relevance":.22,"novelty":.10,"market_sensitivity":.15,"historical_similarity":.08,"market_regime":.07}
+        impact=round(sum(components[k]*weights[k] for k in weights),1);freshness=_freshness(item.get("published_at"))
+        return {**item,"summary":summary,"one_sentence_summary":summary or title,"category":category,"analysis_version":ANALYSIS_VERSION,"analysis_status":"RULE_ENGINE_ANALYZED","fingerprint":_fingerprint(title,summary),"detected_at":item.get("collected_at") or now_utc(),"updated_at":now_utc(),"freshness":freshness,"source_registry":registry or None,"symbols":symbols,"sectors":sectors,"reason":reasons,"event":{"subject":symbols[0] if symbols else (sectors[0] if sectors else "市场"),"event_type":event_type,"event_time":item.get("published_at"),"direction":direction,"sentiment":label,"affected_objects":symbols,"affected_symbols":symbols,"affected_sectors":sectors,"affected_market":item.get("market"),"magnitude":magnitude,"confidence":round(confidence,2)},"sentiment":{"score":score,"direction":direction,"label":label,"method":self.method,"evidence":[{"keyword":w,"weight":s} for w,s in contrib],"notice":"Sentiment is text direction, not market probability."},"impact":{"score":impact,"level":"极高" if impact>=80 else "高" if impact>=60 else "中" if impact>=35 else "低","primary":direct,"secondary":indirect,"counter":risk,"components":components,"weights":weights,"method":"auditable weighted impact components","notice":"Impact Score measures materiality; it is not P(UP)."}}
 
 class TradingDecisionEngine:
     def decide(self,news_score,technical_score=None,volume_ratio=None,sample_count=0):

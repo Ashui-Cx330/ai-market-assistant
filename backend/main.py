@@ -40,7 +40,8 @@ from .strategy_engine import (SIGNAL_KEYS, StrategyEngine, strategy_backtest,
                               strategy_incremental_experiment, walk_forward_strategy,
                               optimize_strategy_parameters, ml_ict_incremental_experiment)
 from .realtime import realtime_manager, utc_now
-from .news_intelligence import build_intelligence, collect_historical_news, collect_news, event_backtest
+from .news_intelligence import SOURCE_REGISTRY, build_intelligence, collect_historical_news, collect_news, event_backtest
+from .market_intelligence import build_snapshot_from_prediction, intelligence_view, track_record
 from .terminal_v19 import router as terminal_v19_router
 from .symbol_registry import schedule_refresh as schedule_symbol_refresh
 from .symbol_registry import status as symbol_registry_status
@@ -51,6 +52,8 @@ from .performance import snapshot as performance_snapshot
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))["version"]
 _PREDICTION_SEMAPHORE = asyncio.Semaphore(1)
+_INTELLIGENCE_JOBS: dict[str,dict] = {}
+_INTELLIGENCE_TASKS: set[asyncio.Task] = set()
 
 
 def serialized_prediction(function):
@@ -214,9 +217,47 @@ def news_providers() -> dict:
     return ok({"providers":["EastmoneyAnnouncementProvider","CoinDeskProvider","CointelegraphProvider",
                             "CNBCMarketsProvider","BBCBusinessProvider","YahooFinanceProvider"],
                "health":load_provider_health(), "active_source":"multiple independent public providers",
-               "nlp_method":"financial-event-rules-v2 deterministic rules",
+               "nlp_method":"financial-event-rules-v3 deterministic rules",
                "finbert_status":"NOT_INSTALLED",
+               "source_registry":list(SOURCE_REGISTRY),
                "notice":"Provider 可独立降级；当前分析是可审计规则引擎，不冒充 FinBERT/LLM。"})
+
+
+@app.get("/api/market-intelligence/{asset_type}/{symbol}")
+def market_intelligence_view(asset_type: str, symbol: str) -> dict:
+    if asset_type not in {"stock","crypto"}:raise HTTPException(400,"asset_type 必须是 stock 或 crypto")
+    normalized=resolved_symbol(symbol,asset_type)
+    return ok(intelligence_view(normalized,asset_type),source="immutable local intelligence store")
+
+
+@app.get("/api/intelligence-track-record")
+def market_intelligence_track_record(symbol: str | None = None, asset_type: str | None = None) -> dict:
+    return ok(track_record(symbol,asset_type),source="immutable prediction_history")
+
+
+@app.get("/api/intelligence-jobs/{job_id}")
+def market_intelligence_job(job_id: str) -> dict:
+    job=_INTELLIGENCE_JOBS.get(job_id)
+    if not job:raise HTTPException(404,"未找到该计算任务")
+    return ok(job,source="in-process background job")
+
+
+@app.post("/api/market-intelligence/recalculate")
+async def recalculate_market_intelligence(body: PredictionRequest) -> dict:
+    symbol=resolved_symbol(body.symbol,body.asset_type);key=f"{body.asset_type}:{symbol}"
+    running=next((x for x in _INTELLIGENCE_JOBS.values() if x.get("key")==key and x.get("status") in {"QUEUED","RUNNING"}),None)
+    if running:return ok(running,"已有相同标的在后台计算")
+    job_id=uuid.uuid4().hex;job={"job_id":job_id,"key":key,"symbol":symbol,"asset_type":body.asset_type,"status":"QUEUED","created_at":utc_now()};_INTELLIGENCE_JOBS[job_id]=job
+    async def run():
+        job["status"]="RUNNING";job["started_at"]=utc_now()
+        try:
+            response=await api_predict(body);payload=response["data"]
+            snapshot=await asyncio.to_thread(build_snapshot_from_prediction,symbol,body.asset_type,payload,"manual_or_new_information")
+            job.update({"status":"COMPLETED","completed_at":utc_now(),"snapshot_id":snapshot["snapshot_id"]})
+        except Exception as exc:
+            job.update({"status":"FAILED","completed_at":utc_now(),"error":str(exc) or type(exc).__name__})
+    task=asyncio.create_task(run(),name=f"market-intelligence-{job_id}");_INTELLIGENCE_TASKS.add(task);task.add_done_callback(_INTELLIGENCE_TASKS.discard)
+    return ok(job,"AI市场情报已在后台计算，页面不会被阻塞")
 
 
 @app.get("/api/news/intelligence")
@@ -496,6 +537,9 @@ async def api_predict(body: PredictionRequest) -> dict:
 
 async def _realtime_prediction(symbol: str, asset_type: str, interval: str, reasons: list[str]) -> dict:
     result = await api_predict(PredictionRequest(symbol=symbol,asset_type=asset_type,interval=interval))
+    snapshot=await asyncio.to_thread(build_snapshot_from_prediction,resolved_symbol(symbol,asset_type),asset_type,
+                                     result["data"],"realtime:"+",".join(reasons))
+    result["data"]["market_intelligence_snapshot_id"]=snapshot["snapshot_id"]
     result["realtime"] = {"mode":"LIVE","trigger_reasons":reasons,"generated_at":utc_now()}
     return result
 

@@ -1,12 +1,14 @@
 # AI行情助手
 
-当前版本 v1.10.5 将行情页面改为 stale-while-revalidate，避免后台 SQLite 缓存争用阻塞点击；新闻中心只展示明确关联自选资产的快讯，并生成融合 V5 技术策略、ICT/SMC、FVG/BOS、Fibonacci、ATR 和新闻时间衰减的多空风险报告。
+当前开发版本 v1.11.0 新增可审计 AI Market Intelligence：资产详情异步读取不可变预测快照，展示多周期校准模型概率、特征贡献、判断变化、事件时间线、相似事件样本状态和本机 Track Record。新闻情绪、Impact Score 与上涨概率严格分离；新闻尚未通过跨市场消融验证时不会静默进入概率模型。
+
+上一正式版本 v1.10.5 已将行情页面改为 stale-while-revalidate，避免后台 SQLite 缓存争用阻塞点击；新闻中心只展示明确关联自选资产的快讯，并生成融合 V5 技术策略、ICT/SMC、FVG/BOS、Fibonacci、ATR 和新闻时间衰减的多空风险报告。
 
 本地运行的 A 股与加密货币行情研究平台，提供真实行情、K 线、技术指标、机器学习概率预测、历史回测、自选和模拟交易。系统不生成 Mock 行情，不连接真实交易账户，也不构成投资建议。
 
 ## Windows 安装
 
-双击 `outputs\desktop\AI-Market-Assistant-Setup-v1.10.5.exe` 完成安装。桌面会出现“AI行情助手”，以后直接双击即可；无需打开项目目录、Python、Node、Docker 或命令行。
+双击 `outputs\desktop\AI-Market-Assistant-Setup-v1.11.0.exe` 完成安装。桌面会出现“AI行情助手”，以后直接双击即可；无需打开项目目录、Python、Node、Docker 或命令行。
 
 - 程序目录：`%LOCALAPPDATA%\Programs\AI行情助手`
 - 用户数据：`%APPDATA%\AI行情助手`

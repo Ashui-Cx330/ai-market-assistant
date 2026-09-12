@@ -1,6 +1,14 @@
 # AI行情助手自动更新与发布
 
-当前代码版本：**v1.10.5**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+当前代码版本：**v1.11.0（开发中，尚未发布）**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+
+## v1.11.0 / 可审计 AI Market Intelligence
+
+- 资产详情即时读取本地不可变快照，真实模型在后台串行计算，不阻塞行情与 K 线。
+- 多周期概率只取 PerformanceWeightedEnsemble 的校准输出；新闻情绪与 Impact Score 不冒充概率。
+- 新增 Source Registry、30 类事件分类、发布时间/发现时间/更新时间、新鲜度、新闻指纹和 Impact 分项。
+- 新增“为什么改变”、情报时间线、相似事件最低样本门槛和 Prediction Track Record 接口。
+- 当前新闻增量预测价值仍是 `DATA_INSUFFICIENT`，未通过消融前只作为解释、风险与重算触发器。
 
 ## v1.10.5 / 无阻塞刷新与自选快讯评估
 

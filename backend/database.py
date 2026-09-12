@@ -150,7 +150,14 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS ai_score_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, asset_type TEXT NOT NULL,
                 score INTEGER NOT NULL, observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );"""
+            );
+            CREATE TABLE IF NOT EXISTS market_intelligence_snapshots (
+                snapshot_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, asset_type TEXT NOT NULL,
+                model_version TEXT, data_cutoff TEXT NOT NULL, generated_at TEXT NOT NULL,
+                trigger_reason TEXT NOT NULL, payload_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_market_intelligence_asset
+                ON market_intelligence_snapshots(symbol,asset_type,generated_at DESC);"""
         )
         prediction_columns={row[1] for row in conn.execute("PRAGMA table_info(prediction_history)")}
         migrations={"prediction_id":"TEXT","model_version":"TEXT","feature_version":"TEXT","risk_reward":"REAL",
@@ -219,10 +226,11 @@ def save_news_intelligence(items: list[dict], symbol: str | None = None) -> int:
 def load_news_intelligence(symbol: str | None = None, limit: int = 500) -> list[dict]:
     with connection() as conn:
         if symbol:
-            rows = conn.execute("""SELECT n.payload_json,h.payload_json AS outcome_json FROM news n
+            upper=str(symbol).upper();base=re.sub(r"\.(SH|SZ)$","",upper)
+            rows = conn.execute("""SELECT DISTINCT n.payload_json,h.payload_json AS outcome_json FROM news n
                 JOIN news_stock_relations r ON r.news_id=n.id
                 LEFT JOIN historical_events h ON h.news_id=n.id AND h.symbol=r.symbol
-                WHERE r.symbol=? ORDER BY COALESCE(n.published_at,n.collected_at) DESC LIMIT ?""", (symbol, limit)).fetchall()
+                WHERE r.symbol IN (?,?) ORDER BY COALESCE(n.published_at,n.collected_at) DESC LIMIT ?""", (upper,base,limit)).fetchall()
         else:
             rows = conn.execute("SELECT payload_json FROM news ORDER BY COALESCE(published_at,collected_at) DESC LIMIT ?", (limit,)).fetchall()
     result=[]
@@ -555,3 +563,22 @@ def prediction_statistics() -> dict:
     by_horizon={h:metrics([x for x in rows if x["horizon"]==h]) for h in ("1H","4H","1D")}
     regimes=sorted({x["regime"] for x in rows if x["regime"]})
     return {"overall":metrics(rows),"by_horizon":by_horizon,"by_regime":{r:metrics([x for x in rows if x["regime"]==r]) for r in regimes}}
+
+
+def save_market_intelligence_snapshot(snapshot: dict) -> str:
+    """Append an immutable intelligence snapshot; historical failures stay intact."""
+    snapshot_id=str(snapshot.get("snapshot_id") or uuid.uuid4())
+    with connection() as conn:
+        conn.execute("""INSERT INTO market_intelligence_snapshots
+            (snapshot_id,symbol,asset_type,model_version,data_cutoff,generated_at,trigger_reason,payload_json)
+            VALUES(?,?,?,?,?,?,?,?)""",(snapshot_id,snapshot["symbol"],snapshot["asset_type"],snapshot.get("model_version"),
+            snapshot["data_cutoff"],snapshot["generated_at"],snapshot.get("trigger_reason","manual"),
+            json.dumps({**snapshot,"snapshot_id":snapshot_id},ensure_ascii=False)))
+    return snapshot_id
+
+
+def market_intelligence_snapshots(symbol: str, asset_type: str, limit: int = 20) -> list[dict]:
+    with connection() as conn:
+        rows=conn.execute("""SELECT payload_json FROM market_intelligence_snapshots
+            WHERE symbol=? AND asset_type=? ORDER BY generated_at DESC LIMIT ?""",(symbol,asset_type,limit)).fetchall()
+    return [json.loads(row["payload_json"]) for row in rows]

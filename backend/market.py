@@ -102,7 +102,15 @@ async def stock_quote(symbol: str, force_refresh: bool = False) -> dict:
     if not force_refresh and (cached := cache.get(key)): return cached
     async with httpx.AsyncClient(timeout=8, headers=HEADERS, follow_redirects=True) as client:
         if _us_stock(symbol):
-            response=await client.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",params={"interval":"1m","range":"1d"});response.raise_for_status();node=response.json()["chart"]["result"][0];meta=node["meta"]
+            last_error=None
+            for attempt in range(2):
+                try:
+                    response=await client.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",params={"interval":"1m","range":"1d"});response.raise_for_status();break
+                except Exception as exc:
+                    last_error=exc
+                    if attempt==0:await asyncio.sleep(.35)
+            else:raise last_error or RuntimeError("Yahoo Finance 行情不可用")
+            node=response.json()["chart"]["result"][0];meta=node["meta"]
             price=float(meta.get("regularMarketPrice"));previous=float(meta.get("chartPreviousClose") or meta.get("previousClose") or price);quote=node.get("indicators",{}).get("quote",[{}])[0]
             highs=[x for x in quote.get("high",[]) if x is not None];lows=[x for x in quote.get("low",[]) if x is not None];volumes=[x for x in quote.get("volume",[]) if x is not None]
             result={"symbol":symbol,"canonical_symbol":symbol,"name":meta.get("shortName") or meta.get("longName") or symbol,"asset_type":"stock","market":"美股","currency":meta.get("currency") or "USD","price":price,"change":price-previous,"change_percent":((price/previous)-1)*100 if previous else 0,"open":float(meta.get("regularMarketOpen") or previous),"previous_close":previous,"high":float(meta.get("regularMarketDayHigh") or max(highs,default=price)),"low":float(meta.get("regularMarketDayLow") or min(lows,default=price)),"volume":float(meta.get("regularMarketVolume") or (volumes[-1] if volumes else 0)),"amount":None,"source":"Yahoo Finance public chart API","updated_at":datetime.fromtimestamp(int(meta.get("regularMarketTime") or datetime.now().timestamp()),timezone.utc).isoformat()}
@@ -224,6 +232,11 @@ async def stock_kline(symbol: str, interval: str, limit: int = 400, force_refres
         if interval not in YAHOO_INTERVALS:raise ValueError("美股支持 1m/5m/15m/30m/1h/4h/1d")
         key=f"stock-kline:{symbol}:{interval}:{limit}"
         if not force_refresh and (cached:=cache.get(key)):return cached
+        if not force_refresh:
+            try:return await stock_kline(requested_symbol,interval,limit,True)
+            except Exception:
+                await asyncio.sleep(.35)
+                return await stock_kline(requested_symbol,interval,limit,True)
         yahoo_interval,range_value=YAHOO_INTERVALS[interval]
         async with httpx.AsyncClient(timeout=18,headers=HEADERS,follow_redirects=True) as client:
             response=await client.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",params={"interval":yahoo_interval,"range":range_value,"events":"history"});response.raise_for_status();node=response.json()["chart"]["result"][0];quotes=node["indicators"]["quote"][0];candles=[]
@@ -293,6 +306,9 @@ async def stock_kline(symbol: str, interval: str, limit: int = 400, force_refres
                 candles=_parse_tencent_daily_rows(rows)
                 if candles:return cache.set(key,(candles[-limit:],"腾讯证券历史行情（备用）"),300)
             except Exception as exc: errors.append(f"腾讯证券:{type(exc).__name__}:{str(exc)[:120]}")
+        if not force_refresh:
+            await asyncio.sleep(.35)
+            return await stock_kline(requested_symbol,interval,limit,True)
         raise RuntimeError("K线数据获取失败（"+"；".join(errors)+"）")
 
 
@@ -309,6 +325,10 @@ async def crypto_kline(symbol: str, interval: str, limit: int = 400, force_refre
         if cached:=cache.get(key):return cached
         if limit<3000 and (cached:=cache.get(f"crypto-kline:{symbol}:{interval}:3000")):
             return cached[0][-limit:],cached[1]
+        try:return await crypto_kline(symbol,interval,limit,True)
+        except Exception:
+            await asyncio.sleep(.35)
+            return await crypto_kline(symbol,interval,limit,True)
     async with httpx.AsyncClient(timeout=15,headers=HEADERS,follow_redirects=True) as client:
         errors=[]
         try:
