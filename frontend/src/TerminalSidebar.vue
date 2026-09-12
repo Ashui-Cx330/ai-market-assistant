@@ -3,7 +3,7 @@ defineProps<{page:string;version:string}>()
 const emit=defineEmits<{(e:'navigate',page:string):void}>()
 const groups=[
   {label:'市场',items:[['home','⌂','首页'],['market','⌁','行情'],['watchlist','☆','自选']]},
-  {label:'AI 分析',items:[['screener','⌕','AI 选股'],['prediction','◎','AI 预测'],['modelLab','◫','模型表现'],['news','◉','新闻情报']]},
+  {label:'AI 分析',items:[['screener','⌕','AI 选股'],['prediction','◎','AI Research'],['quantResearch','∑','Quant Research'],['modelLab','◫','模型表现'],['news','◉','新闻情报']]},
   {label:'策略',items:[['strategy','⌘','策略实验室'],['backtest','↗','回测']]},
   {label:'交易',items:[['paper','▣','模拟交易']]},
   {label:'AI',items:[['copilot','✦','AI Copilot']]},

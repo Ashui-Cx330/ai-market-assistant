@@ -27,6 +27,7 @@ type Page =
   | "watchlist"
   | "screener"
   | "prediction"
+  | "quantResearch"
   | "modelLab"
   | "news"
   | "strategy"
@@ -35,13 +36,18 @@ type Page =
   | "copilot"
   | "settings";
 const page = ref<Page>("home"),
-  appVersion = ref("1.12.1"),
+  appVersion = ref("1.13.0"),
   pageLoading = ref(false),
   pageError = ref("");
 const dashboard = ref<any>(null),
   scanner = ref<any>({ rows: [], errors: [] }),
   modelLab = ref<any>(null),
   dataHealth = ref<any>(null);
+const quantDashboard = ref<any>(null),
+  quantResult = ref<any>(null),
+  quantLoading = ref(false),
+  quantMarket = ref("US"),
+  quantHorizon = ref("T+5");
 const scannerFilters = ref({
   query: "",
   market: "全部",
@@ -279,6 +285,44 @@ async function loadModelLab() {
   } finally {
     pageLoading.value = false;
   }
+}
+async function loadQuantDashboard() {
+  pageLoading.value = true;
+  pageError.value = "";
+  try {
+    quantDashboard.value = await request<any>("/api/quant-v3/dashboard");
+    quantResult.value = quantDashboard.value.markets?.[quantMarket.value] || null;
+  } catch (e) {
+    pageError.value = e instanceof Error ? e.message : "量化研究状态读取失败";
+  } finally {
+    pageLoading.value = false;
+  }
+}
+async function runDeepResearch() {
+  quantLoading.value = true;
+  pageError.value = "";
+  try {
+    const crypto = quantMarket.value === "CRYPTO";
+    quantResult.value = await postLong<any>(
+      "/api/quant-v3/research",
+      {
+        market: quantMarket.value,
+        interval: crypto && ["1H", "4H"].includes(quantHorizon.value) ? "1h" : "1d",
+        horizon: quantHorizon.value,
+      },
+      900000,
+    );
+    ElMessage.success("五窗口深度研究完成");
+  } catch (e) {
+    pageError.value = e instanceof Error ? e.message : "深度研究失败";
+  } finally {
+    quantLoading.value = false;
+  }
+}
+function changeQuantMarket(value: string) {
+  quantMarket.value = value;
+  quantHorizon.value = value === "CRYPTO" ? "24H" : "T+5";
+  quantResult.value = quantDashboard.value?.markets?.[value] || null;
 }
 async function loadDataHealth() {
   try {
@@ -855,6 +899,7 @@ const paths: Record<Page, string> = {
   screener: "/screener",
   prediction: "/prediction",
   modelLab: "/model-lab",
+  quantResearch: "/quant-research",
   news: "/news",
   strategy: "/strategy",
   backtest: "/backtest",
@@ -882,6 +927,7 @@ async function nav(target: string, route = true) {
   if (target === "market" || target === "screener") await runScanner();
   if (target === "watchlist") await loadWatchlist();
   if (target === "modelLab") await loadModelLab();
+  if (target === "quantResearch") await loadQuantDashboard();
   if (target === "news") await loadNews();
   if (target === "settings") await loadDataHealth();
   if (target === "paper") {
@@ -931,6 +977,7 @@ function restoreRoute() {
     "/screener": "screener",
     "/prediction": "prediction",
     "/model-lab": "modelLab",
+    "/quant-research": "quantResearch",
     "/news": "news",
     "/strategy": "strategy",
     "/backtest": "backtest",
@@ -947,6 +994,7 @@ function refresh() {
   else if (page.value === "news") void loadNews(undefined, true);
   else if (page.value === "paper") void loadPaper();
   else if (page.value === "settings") void loadDataHealth();
+  else if (page.value === "quantResearch") void loadQuantDashboard();
   else if (page.value === "detail") {
     void loadAssetWorkspace();
     if (selected.value) {
@@ -992,7 +1040,9 @@ onBeforeUnmount(() => {
                         ? "AI Screener"
                         : page === "prediction"
                           ? "AI Outlook"
-                          : page === "modelLab"
+                          : page === "quantResearch"
+                            ? "Quant Research"
+                            : page === "modelLab"
                             ? "Model Lab"
                             : page === "news"
                               ? "AI Market Intelligence"
@@ -1658,8 +1708,8 @@ onBeforeUnmount(() => {
         <div class="action-header">
           <div>
             <span>AI OUTLOOK · {{ selected?.symbol }}</span>
-            <h2>概率、证据与模型状态</h2>
-            <p>日线目标严格按未来交易日/自然日对齐；样本不足时不生成。</p>
+            <h2>Legacy Experimental Benchmark</h2>
+            <p>Production Model = NONE。下列概率只作为旧模型研究基线；样本不足时不生成。</p>
           </div>
           <button class="primary" @click="runAI" :disabled="aiLoading">
             {{ aiLoading ? "训练与验证中…" : "运行真实预测" }}
@@ -1771,6 +1821,73 @@ onBeforeUnmount(() => {
         <div v-else class="empty-state large">
           选择标的后运行预测。页面不会自动复用旧结果，也不会预填概率。
         </div>
+      </section>
+
+      <section
+        v-else-if="page === 'quantResearch'"
+        class="workspace quant-research"
+      >
+        <div class="action-header quant-research-header">
+          <div>
+            <span>PERSONAL QUANT RESEARCH AGENT</span>
+            <h2>寻找统计优势，而不是生成买卖口号</h2>
+            <p>数据审计 → 三任务标签 → 五窗口 Walk-Forward → Alpha 排名 → 成本后组合 → 上线门禁</p>
+          </div>
+          <button :disabled="quantLoading" @click="runDeepResearch">
+            {{ quantLoading ? "深度研究运行中…" : "Deep Research" }}
+          </button>
+        </div>
+        <div class="quant-controls terminal-panel">
+          <div><b>市场</b><button v-for="x in ['CN','US','CRYPTO']" :key="x" :class="{active:quantMarket===x}" @click="changeQuantMarket(x)">{{ x }}</button></div>
+          <div><b>周期</b><button v-for="x in quantMarket==='CRYPTO'?['1H','4H','24H','7D']:['T+1','T+5','T+20']" :key="x" :class="{active:quantHorizon===x}" @click="quantHorizon=x">{{ x }}</button></div>
+        </div>
+        <div class="quant-status-grid">
+          <article class="terminal-panel"><span>Production Model</span><strong class="negative">{{ quantResult?.production_model || 'NONE' }}</strong><small>模型不得自动上线</small></article>
+          <article class="terminal-panel"><span>Research Decision</span><strong :class="quantResult?.decision==='NO_EDGE'?'negative':'warning'">{{ quantResult?.decision || 'NO EDGE' }}</strong><small>NO EDGE 是有效研究结论</small></article>
+          <article class="terminal-panel"><span>Temporal Audit</span><strong :class="quantResult?.temporal_leakage_audit?.status==='PASSED'?'positive':'warning'">{{ quantResult?.temporal_leakage_audit?.status || '等待运行' }}</strong><small>随机切分：禁止</small></article>
+          <article class="terminal-panel"><span>Uncertainty</span><strong class="warning">{{ quantResult?.uncertainty?.level || 'HIGH' }}</strong><small>高不确定性禁止强方向</small></article>
+        </div>
+        <template v-if="quantResult">
+          <section class="terminal-panel quant-section">
+            <header><div><span>MODEL LEADERBOARD</span><h2>统一数据与五窗口竞赛</h2></div><b>{{ quantResult.model_tournament?.best_regressor || '无合格模型' }}</b></header>
+            <div class="performance-table">
+              <article v-for="(model,name) in quantResult.model_tournament?.regression" :key="String(name)">
+                <h3>{{ name }}</h3><strong>Rank IC {{ model.rank_ic?.median ?? '—' }}</strong>
+                <span>IC {{ model.ic?.median ?? '—' }}</span><span>最差窗口 {{ model.rank_ic?.worst ?? '—' }}</span>
+                <small>正窗口比例 {{ model.rank_ic?.positive_window_ratio ?? '—' }}</small>
+              </article>
+            </div>
+          </section>
+          <div class="quant-two-column">
+            <section class="terminal-panel quant-section"><header><h2>Dataset / Label Audit</h2></header>
+              <p>数据：{{ quantResult.dataset_audit?.status }} · {{ quantResult.dataset_audit?.totals?.candles }} 根K线 · {{ quantResult.dataset_audit?.assets?.length }} 个标的</p>
+              <p>目标：收益回归 / ATR动态方向 / 大幅下行风险</p><p>阈值：仅由每个训练窗口确定</p>
+            </section>
+            <section class="terminal-panel quant-section"><header><h2>Portfolio After Costs</h2></header>
+              <div v-for="(model,name) in quantResult.portfolio_backtest?.models" :key="String(name)" class="quant-row"><b>{{ name }}</b><span>Top10 {{ model.top10_bottom10?.total_return }} / Top20 {{ model.top20_bottom20?.total_return }} · Sharpe {{ model.top20_bottom20?.sharpe ?? '—' }} · MDD {{ model.top20_bottom20?.maximum_drawdown }}</span></div>
+            </section>
+          </div>
+          <div class="quant-two-column">
+            <section class="terminal-panel quant-section"><header><h2>Factor / SHAP</h2></header>
+              <p v-if="quantResult.explainability?.status!=='AVAILABLE'">{{ quantResult.explainability?.reason || '尚无可审计解释' }}</p>
+              <div v-for="x in quantResult.explainability?.top_factors || []" :key="x.feature" class="quant-row"><b>{{ x.feature }}</b><span>SHAP {{ x.shap }}</span></div>
+              <small>SHAP 是模型贡献，不是概率。</small>
+            </section>
+            <section class="terminal-panel quant-section"><header><h2>Model Drift / Governance</h2></header>
+              <p>{{ quantResult.model_drift?.status || quantDashboard?.model_drift?.status }}</p>
+              <p>Champion：{{ quantResult.champion || 'NONE' }}</p><p>自动重训：关闭</p><p>News：Experimental，生产权重 0</p>
+            </section>
+          </div>
+          <div class="quant-two-column">
+            <section class="terminal-panel quant-section"><header><h2>Factor Ablation</h2></header>
+              <div v-for="(factor,name) in quantResult.factor_research?.ablation" :key="String(name)" class="quant-row"><b>{{ name }}</b><span>Rank IC {{ factor.median ?? '—' }} · ICIR {{ factor.icir ?? '—' }} · 正窗口 {{ factor.positive_window_ratio ?? '—' }}</span></div>
+            </section>
+            <section class="terminal-panel quant-section"><header><h2>Regime Stability</h2></header>
+              <template v-for="(regimes,model) in quantResult.regime_performance" :key="String(model)"><div v-for="(metric,regime) in regimes" :key="String(model)+String(regime)" class="quant-row"><b>{{ model }} · {{ regime }}</b><span>Rank IC {{ metric.rank_ic?.median ?? '—' }} · {{ metric.samples }} 样本</span></div></template>
+            </section>
+          </div>
+        </template>
+        <div v-else class="empty-state large">选择市场和周期后运行 Deep Research。研究完成前不会展示预填概率或虚构排行榜。</div>
       </section>
 
       <section

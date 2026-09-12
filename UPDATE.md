@@ -170,6 +170,8 @@
 
 ## 当前实现
 
+- v1.13.0 新增 Quant Research Pipeline V3 和 11 份可复核研究报告。该版本不把任何实验模型晋级为生产模型；`NO EDGE` 是正式验收结论而不是更新失败。
+
 - Electron 使用 `electron-updater`，启动后异步检查更新；设置页也提供“检查更新”。
 - GitHub Publisher 从构建环境变量 `GH_OWNER`、`GH_REPO` 读取，不在源码、前端或安装包中保存 Token。
 - 配置真实仓库后，electron-builder 同一次构建生成安装包、`.blockmap`、`latest.yml` 和客户端内置的 `app-update.yml`。

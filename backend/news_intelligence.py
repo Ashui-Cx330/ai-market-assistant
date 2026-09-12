@@ -224,7 +224,23 @@ def prediction_horizons(composite,sample_count):
         edge=max(-30,min(30,composite*d*.3));up=33.3+edge;down=33.3-edge;out[h]={"up":round(up,1),"flat":round(100-up-down,1),"down":round(down,1),"type":"uncalibrated_evidence_estimate","validated_samples":sample_count}
     return out
 
-def build_intelligence(items,symbol=None,name=None,technical_score=None,volume_ratio=None,sample_count=0):
+def structured_similarity(query:dict,candidates:list[dict],limit:int=5)->list[dict]:
+    """Deterministic event similarity; the language model never assigns similarity."""
+    qevent=query.get("event",{});qsent=query.get("sentiment",{});qimpact=float(query.get("impact",{}).get("score") or 0)
+    qsectors=set(query.get("sectors") or []);qregime=query.get("market_regime");qvol=query.get("volatility_regime")
+    ranked=[]
+    for item in candidates:
+        event=item.get("event",{});sent=item.get("sentiment",{});sectors=set(item.get("sectors") or [])
+        union=len(qsectors|sectors);sector_score=len(qsectors&sectors)/union if union else 0.
+        score=(.35*float(event.get("event_type")==qevent.get("event_type"))+
+               .15*float(sent.get("label")==qsent.get("label"))+
+               .15*max(0.,1-abs(float(item.get("impact",{}).get("score") or 0)-qimpact)/100)+
+               .15*sector_score+.10*float(bool(qregime) and item.get("market_regime")==qregime)+
+               .10*float(bool(qvol) and item.get("volatility_regime")==qvol))
+        ranked.append({"similarity":round(score,4),"method":"structured-v1","event":item})
+    return sorted(ranked,key=lambda row:(-row["similarity"],str(row["event"].get("id",""))))[:limit]
+
+def build_intelligence(items,symbol=None,name=None,technical_score=None,volume_ratio=None,sample_count=0,historical_events=None):
     analyzed=[EventExtractionEngine().analyze(x,symbol,name) for x in items if _valid(str(x.get("title") or ""))];analyzed.sort(key=lambda x:(x["impact"]["score"],x.get("published_at") or ""),reverse=True);scores=[x["sentiment"]["score"] for x in analyzed];market=round(sum(scores)/len(scores),1) if scores else 0;positive=sum(x>=10 for x in scores);negative=sum(x<=-10 for x in scores);sectors={}
     for item in analyzed:
         # Each card gets its own event-conditioned estimate.  Never reuse the
@@ -239,10 +255,19 @@ def build_intelligence(items,symbol=None,name=None,technical_score=None,volume_r
         for sector in item["sectors"]:
             b=sectors.setdefault(sector,{"positive":0,"negative":0,"neutral":0,"score":0});key="positive" if item["sentiment"]["score"]>=10 else "negative" if item["sentiment"]["score"]<=-10 else "neutral";b[key]+=1;b["score"]+=item["sentiment"]["score"]
     decision=TradingDecisionEngine().decide(market,technical_score,volume_ratio,sample_count)
-    return {"status":"AVAILABLE" if analyzed else "NO_DATA","generated_at":now_utc(),"method":EventExtractionEngine.method,"radar":{"market_sentiment":market,"positive":positive,"negative":negative,"neutral":len(scores)-positive-negative,"major":sum(x["impact"]["score"]>=55 for x in analyzed)},"top_news":analyzed[:10],"all_news":analyzed,"sector_impact":sectors,"watch_list":[x for x in analyzed if x["sentiment"]["score"]>=20][:8],"risk_list":[x for x in analyzed if x["sentiment"]["score"]<=-20][:8],"historical_similar_events":[],"decision":decision,"predictions":prediction_horizons(decision["composite_evidence_score"],sample_count),"point_in_time":"Only immutable publication time and information available then are eligible; execution uses first later trading bar."}
+    similar=structured_similarity(analyzed[0],historical_events or [],5) if analyzed else []
+    return {"status":"AVAILABLE" if analyzed else "NO_DATA","generated_at":now_utc(),"method":EventExtractionEngine.method,"radar":{"market_sentiment":market,"positive":positive,"negative":negative,"neutral":len(scores)-positive-negative,"major":sum(x["impact"]["score"]>=55 for x in analyzed)},"top_news":analyzed[:10],"all_news":analyzed,"sector_impact":sectors,"watch_list":[x for x in analyzed if x["sentiment"]["score"]>=20][:8],"risk_list":[x for x in analyzed if x["sentiment"]["score"]<=-20][:8],"historical_similar_events":similar,"similarity_method":"structured-v1; event type/sentiment/impact/sector/regime/volatility; not LLM judgement","decision":decision,"predictions":prediction_horizons(decision["composite_evidence_score"],sample_count),"point_in_time":"Only immutable publication time and information available then are eligible; execution uses first later trading bar."}
 
 def _dt(v):
     out=datetime.fromisoformat(str(v).replace("Z","+00:00"));return out.replace(tzinfo=timezone.utc) if out.tzinfo is None else out.astimezone(timezone.utc)
+def _distribution(values):
+    if not values:return {"mean":None,"median":None,"std":None,"confidence_interval_95":None}
+    ordered=sorted(float(x) for x in values);count=len(ordered);mean=sum(ordered)/count
+    median=(ordered[count//2] if count%2 else (ordered[count//2-1]+ordered[count//2])/2)
+    variance=sum((x-mean)**2 for x in ordered)/(count-1) if count>1 else 0.;std=math.sqrt(variance)
+    margin=1.96*std/math.sqrt(count) if count>1 else 0.
+    return {"mean":round(mean,6),"median":round(median,6),"std":round(std,6),
+            "confidence_interval_95":[round(mean-margin,6),round(mean+margin,6)] if count>1 else None}
 def event_backtest(events,candles,event_type=None,direction="all",min_impact=0,min_confidence=0,selected_horizon=5,benchmark_candles=None):
     usable=[];wanted=direction.lower()
     for x in events:
@@ -259,13 +284,18 @@ def event_backtest(events,candles,event_type=None,direction="all",min_impact=0,m
         if index is None:continue
         benchmark_index=next((i for i,t in enumerate(benchmark_times) if t>event_time),None)
         entry=float(bars[index]["open"]);benchmark_entry=float(benchmark[benchmark_index]["open"]) if benchmark_index is not None else None
-        row={"news_id":item["id"],"title":item.get("title"),"direction":item.get("sentiment",{}).get("label","neutral"),"event_time":item["published_at"],"entry_time":bars[index]["timestamp"],"entry_price":entry,"returns":{},"abnormal_returns":{}}
+        pre_close=float(bars[index-1]["close"]) if index>0 else entry
+        benchmark_pre=float(benchmark[benchmark_index-1]["close"]) if benchmark_index is not None and benchmark_index>0 else benchmark_entry
+        row={"news_id":item["id"],"title":item.get("title"),"direction":item.get("sentiment",{}).get("label","neutral"),"event_time":item["published_at"],"entry_time":bars[index]["timestamp"],"entry_price":entry,"returns":{},"abnormal_returns":{},"event_window_returns":{},"abnormal_event_window_returns":{}}
         for h in horizons:
             ix=index+h-1
             if ix<len(bars):
-                value=float(bars[ix]["close"])/entry-1;row["returns"][f"T+{h}"]=value;row[f"t{h}_return"]=value
+                value=float(bars[ix]["close"])/entry-1;window_value=float(bars[ix]["close"])/pre_close-1
+                row["returns"][f"T+{h}"]=value;row["event_window_returns"][f"[-1,+{h}]"]=window_value;row[f"t{h}_return"]=value
                 bix=benchmark_index+h-1 if benchmark_index is not None else None
-                if bix is not None and bix<len(benchmark):row["abnormal_returns"][f"T+{h}"]=value-(float(benchmark[bix]["close"])/benchmark_entry-1)
+                if bix is not None and bix<len(benchmark):
+                    row["abnormal_returns"][f"T+{h}"]=value-(float(benchmark[bix]["close"])/benchmark_entry-1)
+                    if benchmark_pre:row["abnormal_event_window_returns"][f"[-1,+{h}]"]=window_value-(float(benchmark[bix]["close"])/benchmark_pre-1)
         if f"T+{selected_horizon}" in row["returns"]:outcomes.append(row)
     metrics={}
     for h in horizons:
@@ -273,13 +303,15 @@ def event_backtest(events,candles,event_type=None,direction="all",min_impact=0,m
         if not pts:continue
         raw=[x[0] for x in pts];directional=[-v if d=="bearish" else v for v,d in pts if d!="neutral"];wins=[v for v in directional if v>0];losses=[v for v in directional if v<0]
         abnormal=[x["abnormal_returns"].get(f"T+{h}") for x in outcomes];abnormal=[x for x in abnormal if x is not None]
-        metrics[f"T+{h}"]={"samples":len(pts),"directional_samples":len(directional),"win_rate":round(len(wins)/len(directional),4) if directional else None,"average_return":round(sum(raw)/len(raw),6),"average_abnormal_return":round(sum(abnormal)/len(abnormal),6) if abnormal else None,"car":round(sum(abnormal)/len(abnormal),6) if abnormal else None,"benchmark_samples":len(abnormal),"max_return":round(max(raw),6),"min_return":round(min(raw),6),"profit_loss_ratio":round((sum(wins)/len(wins))/abs(sum(losses)/len(losses)),4) if wins and losses else None}
+        event_window=[x["event_window_returns"].get(f"[-1,+{h}]") for x in outcomes];event_window=[x for x in event_window if x is not None]
+        abnormal_window=[x["abnormal_event_window_returns"].get(f"[-1,+{h}]") for x in outcomes];abnormal_window=[x for x in abnormal_window if x is not None]
+        metrics[f"T+{h}"]={"samples":len(pts),"directional_samples":len(directional),"win_rate":round(len(wins)/len(directional),4) if directional else None,"average_return":round(sum(raw)/len(raw),6),"return_distribution":_distribution(raw),"event_window":f"[-1,+{h}]","event_window_distribution":_distribution(event_window),"average_abnormal_return":round(sum(abnormal)/len(abnormal),6) if abnormal else None,"abnormal_distribution":_distribution(abnormal),"abnormal_event_window_distribution":_distribution(abnormal_window),"car":round(sum(abnormal)/len(abnormal),6) if abnormal else None,"benchmark_samples":len(abnormal),"max_return":round(max(raw),6),"min_return":round(min(raw),6),"profit_loss_ratio":round((sum(wins)/len(wins))/abs(sum(losses)/len(losses)),4) if wins and losses else None}
     chosen=metrics.get(f"T+{selected_horizon}",{});curve=[]
     for row in sorted(outcomes,key=lambda x:x["event_time"]):
         v=row["returns"][f"T+{selected_horizon}"];curve.append(-v if row["direction"]=="bearish" else v) if row["direction"]!="neutral" else None
     equity=peak=1.;draw=0.
     for v in curve:equity*=1+v;peak=max(peak,equity);draw=min(draw,equity/peak-1)
     evidence="INSUFFICIENT_EVIDENCE" if len(outcomes)<30 else "WEAK" if len(outcomes)<100 else "MODERATE_REQUIRES_SIGNIFICANCE"
-    result={"status":"AVAILABLE" if len(outcomes)>=10 else "DATA_INSUFFICIENT","evidence_status":evidence,"samples":len(outcomes),"minimum_samples":30,"selected_horizon":f"T+{selected_horizon}","metrics":metrics,"win_rate":chosen.get("win_rate") if len(outcomes)>=30 else None,"average_return":chosen.get("average_return"),"max_return":chosen.get("max_return"),"min_return":chosen.get("min_return"),"profit_loss_ratio":chosen.get("profit_loss_ratio") if len(outcomes)>=30 else None,"max_drawdown":round(draw,6),"causality":"publication timestamp; first strictly later trading-bar open; T+N uses observed trading bars","event_study":"asset return minus aligned benchmark; CAR is mean cumulative abnormal return" if benchmark else "BENCHMARK_UNAVAILABLE","outcomes":outcomes}
+    result={"status":"AVAILABLE" if len(outcomes)>=10 else "DATA_INSUFFICIENT","evidence_status":evidence,"samples":len(outcomes),"minimum_samples":30,"selected_horizon":f"T+{selected_horizon}","metrics":metrics,"win_rate":chosen.get("win_rate") if len(outcomes)>=30 else None,"average_return":chosen.get("average_return"),"max_return":chosen.get("max_return"),"min_return":chosen.get("min_return"),"profit_loss_ratio":chosen.get("profit_loss_ratio") if len(outcomes)>=30 else None,"max_drawdown":round(draw,6),"causality":"publication timestamp; first strictly later trading-bar open; T+N uses observed trading bars","event_study":"asset return minus aligned benchmark; CAR is mean cumulative abnormal return" if benchmark else "BENCHMARK_UNAVAILABLE","reaction_graph":{"daily_windows":["[-1,+1]","[-1,+3]","[-1,+5]","[-1,+10]","[-1,+20]"],"intraday_windows":["5m","15m","1h"],"intraday_status":"UNAVAILABLE_WITHOUT_POINT_IN_TIME_INTRADAY_HISTORY"},"outcomes":outcomes}
     if len(outcomes)<30:result["notice"]="历史新闻数据不足30条，事件统计仅用于审计，不生成胜率结论。"
     return result

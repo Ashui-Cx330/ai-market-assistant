@@ -28,8 +28,10 @@ from .database import (DB_PATH, add_watchlist, cancel_paper_order, connection, c
                        resolve_prediction_history, save_backtest, save_external_feature_observations,
                        save_feature_observations, save_historical_event_outcomes, save_news_intelligence,
                        reset_paper_accounts, save_prediction_history, save_provider_health,
-                       save_quant_prediction_snapshot, quant_prediction_snapshots)
+                       save_quant_prediction_snapshot, quant_prediction_snapshots,
+                       save_quant_research_run, latest_quant_research_runs, quant_model_registry)
 from .indicators import indicator_payload
+from .horizons import supported_horizons
 from .market import (crypto_derivatives, crypto_kline, crypto_onchain, crypto_quote, crypto_search, event_risk,
                      canonical_symbol, cross_validate_quote, macro_context, macro_history, news_context, normalize_crypto, stock_fundamental, stock_kline, stock_quote,
                      stock_financial_history, stock_search)
@@ -52,12 +54,21 @@ from .performance import snapshot as performance_snapshot
 from .quant_v2 import ablation as quant_ablation
 from .quant_v2 import benchmark as quant_benchmark
 from .quant_v2 import feature_catalog
+from .quant_v3 import (LEGACY_EXPERIMENTAL_MODELS, dataset_audit as quant_dataset_audit,
+                       model_drift as quant_model_drift, run_research as quant_v3_research)
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))["version"]
 _PREDICTION_SEMAPHORE = asyncio.Semaphore(1)
 _INTELLIGENCE_JOBS: dict[str,dict] = {}
 _INTELLIGENCE_TASKS: set[asyncio.Task] = set()
+_QUANT_V3_RESULTS: dict[str, dict] = {}
+
+QUANT_V3_UNIVERSES = {
+    "CN": ["600519", "000001", "300750", "000858", "601318"],
+    "US": ["NVDA", "AMD", "AVGO", "TSM", "MU", "AAPL", "MSFT", "GOOGL", "AMZN", "META"],
+    "CRYPTO": ["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "LINK", "DOT"],
+}
 
 
 def serialized_prediction(function):
@@ -72,6 +83,7 @@ def serialized_prediction(function):
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    _QUANT_V3_RESULTS.update(latest_quant_research_runs())
     await asyncio.to_thread(ensure_symbol_registry_seeded)
     await realtime_manager.start()
     symbol_refresh_task = schedule_symbol_refresh()
@@ -153,6 +165,13 @@ class QuantResearchRequest(BaseModel):
     interval: str = "1d"
     horizon: str | None = None
     folds: int = Field(default=3, ge=2, le=6)
+
+
+class QuantV3Request(BaseModel):
+    market: str = Field(default="US", pattern="^(CN|US|CRYPTO)$")
+    interval: str = Field(default="1d", pattern="^(1h|4h|1d)$")
+    horizon: str | None = None
+    symbols: list[str] | None = Field(default=None, min_length=3, max_length=20)
 
 
 class BacktestRequest(BaseModel):
@@ -893,6 +912,75 @@ async def quant_ablation_api(body: QuantResearchRequest) -> dict:
 @app.get("/api/quant-v2/snapshots")
 def quant_snapshots(symbol: str | None=None,limit: int=Query(default=100,ge=1,le=500)) -> dict:
     return ok(quant_prediction_snapshots(symbol,limit),source="immutable local SQLite snapshots")
+
+
+def _quant_v3_horizon(market: str, interval: str, requested: str | None) -> str:
+    value = (requested or ("T+5" if market in {"CN", "US"} else "1D")).upper()
+    if value == "24H": value = "1D"
+    allowed = ({"T+1", "T+5", "T+20"} if market in {"CN", "US"} else
+               {"1H", "4H", "1D", "7D"})
+    if value not in allowed:
+        raise HTTPException(400, f"{market} 不支持研究周期 {requested}")
+    if value == "T+1": value = "1D"
+    if value not in supported_horizons(interval):
+        raise HTTPException(400, f"{interval} K线无法严格表达 {requested or value}")
+    return value
+
+
+async def _quant_v3_universe(body: QuantV3Request) -> tuple[dict[str, list[dict]], dict[str, str]]:
+    symbols = body.symbols or QUANT_V3_UNIVERSES[body.market]
+    asset_type = "crypto" if body.market == "CRYPTO" else "stock"
+    async def load(raw: str):
+        symbol = resolved_symbol(raw, asset_type)
+        data, source = await _kline(asset_type, symbol, body.interval, 1200)
+        return symbol, data["candles"], source
+    loaded = await asyncio.gather(*(load(item) for item in symbols), return_exceptions=True)
+    universe: dict[str, list[dict]] = {}; sources: dict[str, str] = {}; failures = []
+    for item in loaded:
+        if isinstance(item, Exception): failures.append(f"{type(item).__name__}: {item}"); continue
+        symbol, candles, source = item
+        if len(candles) >= 260: universe[symbol] = candles; sources[symbol] = source
+        else: failures.append(f"{symbol}: insufficient candles ({len(candles)})")
+    if len(universe) < 3:
+        raise HTTPException(503, f"横截面研究至少需要3个有效标的；当前{len(universe)}。失败：{' | '.join(failures[:5])}")
+    sources["failures"] = " | ".join(failures) if failures else "none"
+    return universe, sources
+
+
+@app.get("/api/quant-v3/dashboard")
+def quant_v3_dashboard() -> dict:
+    records = prediction_history(10000)
+    return ok({"engine": "Quant Research Pipeline V3", "status": "NO_EDGE",
+        "production_model": None, "champion": None, "automatic_retraining": False,
+        "legacy": {name: "EXPERIMENTAL" for name in LEGACY_EXPERIMENTAL_MODELS},
+        "markets": {market: _QUANT_V3_RESULTS.get(market) for market in QUANT_V3_UNIVERSES},
+        "model_registry": quant_model_registry(30),
+        "model_drift": quant_model_drift(records),
+        "news": {"status": "EXPERIMENTAL", "production_probability_weight": 0,
+                 "minimum_event_outcomes": 30},
+        "notice": "NO EDGE is a valid research result. No model can self-promote or self-retrain."},
+        source="local immutable research state")
+
+
+@app.post("/api/quant-v3/dataset-audit")
+async def quant_v3_dataset_audit_api(body: QuantV3Request) -> dict:
+    universe, sources = await _quant_v3_universe(body)
+    return ok(await asyncio.to_thread(quant_dataset_audit, universe, body.market, body.interval),
+              message="真实K线数据审计完成", source=sources)
+
+
+@app.post("/api/quant-v3/research")
+@serialized_prediction
+async def quant_v3_research_api(body: QuantV3Request) -> dict:
+    horizon = _quant_v3_horizon(body.market, body.interval, body.horizon)
+    universe, sources = await _quant_v3_universe(body)
+    result = await asyncio.to_thread(quant_v3_research, universe, body.market, body.interval, horizon, 5)
+    result["requested_horizon"] = body.horizon or horizon
+    result["data_sources"] = sources
+    result["model_drift"] = quant_model_drift(prediction_history(10000))
+    result["run_id"] = save_quant_research_run(result)
+    _QUANT_V3_RESULTS[body.market] = result
+    return ok(result, message="五窗口横截面深度研究完成", source="real market data; point-in-time research")
 
 
 DIST = Path(os.environ.get("TRADING_AI_FRONTEND_DIR", ROOT / "frontend" / "dist"))

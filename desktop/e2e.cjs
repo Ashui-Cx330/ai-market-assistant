@@ -53,6 +53,10 @@ async function run() {
     await page.getByText(/Immutable resolved history/).waitFor()
     await page.getByText(/no random split/).waitFor()
 
+    await nav(page, 'Quant Research', '寻找统计优势，而不是生成买卖口号')
+    await page.getByText('Production Model').waitFor()
+    await page.getByText('NONE', { exact: true }).first().waitFor()
+
     await nav(page, '策略实验室', 'Strategy Lab')
     await page.getByRole('button', { name: '转换为可执行规则' }).click()
     await page.getByText('HOLD_BARS 5').waitFor()

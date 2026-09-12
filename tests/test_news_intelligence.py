@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 
-from backend.news_intelligence import EventExtractionEngine, NewsQuery, _dedupe, _filter, build_intelligence, event_backtest
+from backend.news_intelligence import (EventExtractionEngine, NewsQuery, _dedupe,
+                                       _filter, build_intelligence,
+                                       event_backtest, structured_similarity)
 
 
 def item(identity: str, title: str, published: str):
@@ -38,6 +40,8 @@ def test_point_in_time_backtest_enters_strictly_after_publication_and_rejects_sm
     result=event_backtest([event],candles)
     assert result["status"] == "DATA_INSUFFICIENT"
     assert result["outcomes"][0]["entry_time"] == candles[1]["timestamp"]
+    assert result["metrics"]["T+5"]["event_window"] == "[-1,+5]"
+    assert result["metrics"]["T+5"]["return_distribution"]["mean"] is not None
     future=EventExtractionEngine().analyze(item("2","公司回购",(start+timedelta(days=100)).isoformat()),"600519","测试公司")
     assert event_backtest([future],candles)["samples"] == 0
 
@@ -69,3 +73,13 @@ def test_backtest_filters_direction_and_uses_trading_bars_for_t10():
     result=event_backtest(events,candles,direction="bullish",min_impact=70,min_confidence=.5,selected_horizon=10)
     assert result["status"]=="AVAILABLE" and result["samples"]==12
     assert result["metrics"]["T+10"]["samples"]==12
+
+
+def test_similar_events_use_structured_fields_not_llm_judgement():
+    stamp="2026-01-01T00:00:00+00:00"
+    query=EventExtractionEngine().analyze(item("q","公司回购",stamp),"600519","测试公司")
+    same=EventExtractionEngine().analyze(item("same","公司回购",stamp),"600519","测试公司")
+    different=EventExtractionEngine().analyze(item("different","监管处罚导致亏损",stamp),"600519","测试公司")
+    matches=structured_similarity(query,[different,same])
+    assert matches[0]["event"]["id"]=="same"
+    assert matches[0]["method"]=="structured-v1"

@@ -164,7 +164,21 @@ def init_db() -> None:
                 model_version TEXT NOT NULL, payload_json TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_quant_snapshot_asset
-                ON quant_prediction_snapshots(symbol,asset_type,generated_at DESC);"""
+                ON quant_prediction_snapshots(symbol,asset_type,generated_at DESC);
+            CREATE TABLE IF NOT EXISTS quant_research_runs (
+                run_id TEXT PRIMARY KEY, market TEXT NOT NULL, interval TEXT NOT NULL,
+                horizon TEXT NOT NULL, dataset_version TEXT NOT NULL, status TEXT NOT NULL,
+                champion TEXT, challenger TEXT, generated_at TEXT NOT NULL, payload_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_quant_research_market
+                ON quant_research_runs(market,generated_at DESC);
+            CREATE TABLE IF NOT EXISTS quant_model_registry (
+                model_id TEXT PRIMARY KEY, market TEXT NOT NULL, horizon TEXT NOT NULL,
+                model_name TEXT NOT NULL, model_status TEXT NOT NULL, feature_version TEXT NOT NULL,
+                dataset_version TEXT NOT NULL, training_period TEXT NOT NULL,
+                hyperparameters_json TEXT NOT NULL, validation_metrics_json TEXT NOT NULL,
+                test_metrics_json TEXT NOT NULL, trained_at TEXT NOT NULL
+            );"""
         )
         prediction_columns={row[1] for row in conn.execute("PRAGMA table_info(prediction_history)")}
         migrations={"prediction_id":"TEXT","model_version":"TEXT","feature_version":"TEXT","risk_reward":"REAL",
@@ -497,6 +511,49 @@ def quant_prediction_snapshots(symbol: str | None=None, limit: int=100) -> list[
     return [dict(row) for row in rows]
 
 
+def save_quant_research_run(result: dict) -> str:
+    run_id = str(uuid.uuid4())
+    dataset_version = result.get("dataset_audit", {}).get("dataset_version", "unknown")
+    generated_at = result.get("generated_at") or pd.Timestamp.now(tz="UTC").isoformat()
+    with connection() as conn:
+        conn.execute("""INSERT INTO quant_research_runs
+            (run_id,market,interval,horizon,dataset_version,status,champion,challenger,generated_at,payload_json)
+            VALUES(?,?,?,?,?,?,?,?,?,?)""", (run_id, result["market"], result["interval"], result["horizon"],
+            dataset_version, result["decision"], result.get("champion"), result.get("challenger"), generated_at,
+            json.dumps(result, ensure_ascii=False)))
+        best = result.get("model_tournament", {}).get("best_regressor")
+        if best:
+            version = conn.execute("SELECT COUNT(*) FROM quant_model_registry WHERE market=? AND horizon=? AND model_name=?",
+                                   (result["market"], result["horizon"], best)).fetchone()[0] + 1
+            model_id = f"{best.upper()}-{result['market']}-{result['horizon']}-v{version:03d}"
+            windows = result.get("walk_forward", {}).get("windows", [])
+            period = json.dumps({"first_train": windows[0].get("train") if windows else None,
+                                 "last_test": windows[-1].get("test") if windows else None})
+            metrics = result.get("model_tournament", {}).get("regression", {}).get(best, {})
+            conn.execute("""INSERT INTO quant_model_registry
+                (model_id,market,horizon,model_name,model_status,feature_version,dataset_version,training_period,
+                 hyperparameters_json,validation_metrics_json,test_metrics_json,trained_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (model_id, result["market"], result["horizon"], best,
+                "EXPERIMENTAL", "quant-v3-cross-sectional-1", dataset_version, period,
+                json.dumps({"selection": "fixed research defaults; no test tuning"}),
+                json.dumps({"method": "separate chronological validation"}), json.dumps(metrics), generated_at))
+    return run_id
+
+
+def latest_quant_research_runs() -> dict[str, dict]:
+    with connection() as conn:
+        rows = conn.execute("""SELECT q.* FROM quant_research_runs q JOIN
+            (SELECT market,MAX(generated_at) AS generated_at FROM quant_research_runs GROUP BY market) latest
+            ON q.market=latest.market AND q.generated_at=latest.generated_at""").fetchall()
+    return {row["market"]: json.loads(row["payload_json"]) for row in rows}
+
+
+def quant_model_registry(limit: int = 100) -> list[dict]:
+    with connection() as conn:
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM quant_model_registry ORDER BY trained_at DESC LIMIT ?", (limit,))]
+
+
 def save_prediction_history(symbol: str, asset_type: str, interval: str, prediction: dict, decision: dict) -> int:
     saved = 0
     with connection() as conn:
@@ -557,8 +614,17 @@ def resolve_prediction_history(symbol: str, candles: list[dict]) -> int:
                 mfe=float(path["high"].max()/row["entry_price"]-1) if side=="LONG" else float(row["entry_price"]/path["low"].min()-1)
             correct=int(actual==row["prediction"]);failure=None
             if not correct:
-                failure=("VOLATILITY_UNDERESTIMATED" if row["prediction"]=="FLAT" else
-                         "STOP_HIT_BEFORE_TARGET" if stop_hit else "DIRECTIONAL_MISS_UNATTRIBUTED")
+                confidence=max(float(row["prob_down"]),float(row["prob_flat"]),float(row["prob_up"]))
+                if row["data_quality"] is not None and float(row["data_quality"]) < .6:
+                    failure="DATA_QUALITY"
+                elif confidence >= .65:
+                    failure="OVERCONFIDENCE"
+                elif row["prediction"]=="FLAT":
+                    failure="MAGNITUDE_ERROR"
+                elif abs(actual_return) > max(threshold*2,.02):
+                    failure="VOLATILITY_SPIKE"
+                else:
+                    failure="WRONG_DIRECTION"
             conn.execute("""UPDATE prediction_history SET actual=?,actual_return=?,correct=?,stop_hit=?,tp_hit=?,realized_r=?,
                          mae=?,mfe=?,failure_reason=?,status='RESOLVED',expired_at=CURRENT_TIMESTAMP,resolved_at=CURRENT_TIMESTAMP WHERE id=?""",
                          (actual, actual_return, correct, int(stop_hit), int(tp_hit), realized_r,mae,mfe,failure,row["id"]))
