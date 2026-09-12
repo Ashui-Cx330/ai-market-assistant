@@ -243,7 +243,7 @@ def build_intelligence(items,symbol=None,name=None,technical_score=None,volume_r
 
 def _dt(v):
     out=datetime.fromisoformat(str(v).replace("Z","+00:00"));return out.replace(tzinfo=timezone.utc) if out.tzinfo is None else out.astimezone(timezone.utc)
-def event_backtest(events,candles,event_type=None,direction="all",min_impact=0,min_confidence=0,selected_horizon=5):
+def event_backtest(events,candles,event_type=None,direction="all",min_impact=0,min_confidence=0,selected_horizon=5,benchmark_candles=None):
     usable=[];wanted=direction.lower()
     for x in events:
         label=str(x.get("sentiment",{}).get("label") or "neutral").lower()
@@ -251,26 +251,35 @@ def event_backtest(events,candles,event_type=None,direction="all",min_impact=0,m
         if wanted not in ("all","全部") and label!=wanted:continue
         if float(x.get("impact",{}).get("score") or 0)<min_impact or float(x.get("event",{}).get("confidence") or 0)<min_confidence:continue
         usable.append(x)
-    bars=sorted(candles,key=lambda x:x["timestamp"]);times=[_dt(x["timestamp"]) for x in bars];horizons=(1,3,5,10,20);outcomes=[]
+    bars=sorted(candles,key=lambda x:x["timestamp"]);times=[_dt(x["timestamp"]) for x in bars]
+    benchmark=sorted(benchmark_candles or [],key=lambda x:x["timestamp"]);benchmark_times=[_dt(x["timestamp"]) for x in benchmark]
+    horizons=(1,3,5,10,20);outcomes=[]
     for item in usable:
         event_time=_dt(item["published_at"]);index=next((i for i,t in enumerate(times) if t>event_time),None)
         if index is None:continue
-        entry=float(bars[index]["open"]);row={"news_id":item["id"],"title":item.get("title"),"direction":item.get("sentiment",{}).get("label","neutral"),"event_time":item["published_at"],"entry_time":bars[index]["timestamp"],"entry_price":entry,"returns":{}}
+        benchmark_index=next((i for i,t in enumerate(benchmark_times) if t>event_time),None)
+        entry=float(bars[index]["open"]);benchmark_entry=float(benchmark[benchmark_index]["open"]) if benchmark_index is not None else None
+        row={"news_id":item["id"],"title":item.get("title"),"direction":item.get("sentiment",{}).get("label","neutral"),"event_time":item["published_at"],"entry_time":bars[index]["timestamp"],"entry_price":entry,"returns":{},"abnormal_returns":{}}
         for h in horizons:
             ix=index+h-1
-            if ix<len(bars):value=float(bars[ix]["close"])/entry-1;row["returns"][f"T+{h}"]=value;row[f"t{h}_return"]=value
+            if ix<len(bars):
+                value=float(bars[ix]["close"])/entry-1;row["returns"][f"T+{h}"]=value;row[f"t{h}_return"]=value
+                bix=benchmark_index+h-1 if benchmark_index is not None else None
+                if bix is not None and bix<len(benchmark):row["abnormal_returns"][f"T+{h}"]=value-(float(benchmark[bix]["close"])/benchmark_entry-1)
         if f"T+{selected_horizon}" in row["returns"]:outcomes.append(row)
     metrics={}
     for h in horizons:
         pts=[(x["returns"].get(f"T+{h}"),x["direction"]) for x in outcomes];pts=[x for x in pts if x[0] is not None]
         if not pts:continue
         raw=[x[0] for x in pts];directional=[-v if d=="bearish" else v for v,d in pts if d!="neutral"];wins=[v for v in directional if v>0];losses=[v for v in directional if v<0]
-        metrics[f"T+{h}"]={"samples":len(pts),"directional_samples":len(directional),"win_rate":round(len(wins)/len(directional),4) if directional else None,"average_return":round(sum(raw)/len(raw),6),"max_return":round(max(raw),6),"min_return":round(min(raw),6),"profit_loss_ratio":round((sum(wins)/len(wins))/abs(sum(losses)/len(losses)),4) if wins and losses else None}
+        abnormal=[x["abnormal_returns"].get(f"T+{h}") for x in outcomes];abnormal=[x for x in abnormal if x is not None]
+        metrics[f"T+{h}"]={"samples":len(pts),"directional_samples":len(directional),"win_rate":round(len(wins)/len(directional),4) if directional else None,"average_return":round(sum(raw)/len(raw),6),"average_abnormal_return":round(sum(abnormal)/len(abnormal),6) if abnormal else None,"car":round(sum(abnormal)/len(abnormal),6) if abnormal else None,"benchmark_samples":len(abnormal),"max_return":round(max(raw),6),"min_return":round(min(raw),6),"profit_loss_ratio":round((sum(wins)/len(wins))/abs(sum(losses)/len(losses)),4) if wins and losses else None}
     chosen=metrics.get(f"T+{selected_horizon}",{});curve=[]
     for row in sorted(outcomes,key=lambda x:x["event_time"]):
         v=row["returns"][f"T+{selected_horizon}"];curve.append(-v if row["direction"]=="bearish" else v) if row["direction"]!="neutral" else None
     equity=peak=1.;draw=0.
     for v in curve:equity*=1+v;peak=max(peak,equity);draw=min(draw,equity/peak-1)
-    result={"status":"AVAILABLE" if len(outcomes)>=10 else "DATA_INSUFFICIENT","samples":len(outcomes),"minimum_samples":10,"selected_horizon":f"T+{selected_horizon}","metrics":metrics,"win_rate":chosen.get("win_rate"),"average_return":chosen.get("average_return"),"max_return":chosen.get("max_return"),"min_return":chosen.get("min_return"),"profit_loss_ratio":chosen.get("profit_loss_ratio"),"max_drawdown":round(draw,6),"causality":"publication timestamp; first strictly later trading-bar open; T+N uses observed trading bars","outcomes":outcomes}
-    if len(outcomes)<10:result["notice"]="历史新闻数据不足，无法进行可靠回测。小样本结果仅用于审计。"
+    evidence="INSUFFICIENT_EVIDENCE" if len(outcomes)<30 else "WEAK" if len(outcomes)<100 else "MODERATE_REQUIRES_SIGNIFICANCE"
+    result={"status":"AVAILABLE" if len(outcomes)>=10 else "DATA_INSUFFICIENT","evidence_status":evidence,"samples":len(outcomes),"minimum_samples":30,"selected_horizon":f"T+{selected_horizon}","metrics":metrics,"win_rate":chosen.get("win_rate") if len(outcomes)>=30 else None,"average_return":chosen.get("average_return"),"max_return":chosen.get("max_return"),"min_return":chosen.get("min_return"),"profit_loss_ratio":chosen.get("profit_loss_ratio") if len(outcomes)>=30 else None,"max_drawdown":round(draw,6),"causality":"publication timestamp; first strictly later trading-bar open; T+N uses observed trading bars","event_study":"asset return minus aligned benchmark; CAR is mean cumulative abnormal return" if benchmark else "BENCHMARK_UNAVAILABLE","outcomes":outcomes}
+    if len(outcomes)<30:result["notice"]="历史新闻数据不足30条，事件统计仅用于审计，不生成胜率结论。"
     return result

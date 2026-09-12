@@ -1,6 +1,6 @@
 # AI行情助手
 
-当前开发版本 v1.11.0 新增可审计 AI Market Intelligence：资产详情异步读取不可变预测快照，展示多周期校准模型概率、特征贡献、判断变化、事件时间线、相似事件样本状态和本机 Track Record。新闻情绪、Impact Score 与上涨概率严格分离；新闻尚未通过跨市场消融验证时不会静默进入概率模型。
+当前开发版本 v1.12.0 为 Quant Intelligence Engine V2：新增57项带时间戳的因果特征、A股/美股/Crypto独立画像、Logistic/Random Forest/LightGBM/XGBoost/CatBoost同窗竞赛、概率校准、purged walk-forward、IC/ICIR与含成本风险指标、Crypto 7D、No Clear Edge及不可变预测快照。所有模型当前仍为 Experimental / NO EDGE。
 
 上一正式版本 v1.10.5 已将行情页面改为 stale-while-revalidate，避免后台 SQLite 缓存争用阻塞点击；新闻中心只展示明确关联自选资产的快讯，并生成融合 V5 技术策略、ICT/SMC、FVG/BOS、Fibonacci、ATR 和新闻时间衰减的多空风险报告。
 
@@ -8,7 +8,7 @@
 
 ## Windows 安装
 
-双击 `outputs\desktop\AI-Market-Assistant-Setup-v1.11.0.exe` 完成安装。桌面会出现“AI行情助手”，以后直接双击即可；无需打开项目目录、Python、Node、Docker 或命令行。
+双击 `outputs\desktop\AI-Market-Assistant-Setup-v1.12.0.exe` 完成安装。桌面会出现“AI行情助手”，以后直接双击即可；无需打开项目目录、Python、Node、Docker 或命令行。
 
 - 程序目录：`%LOCALAPPDATA%\Programs\AI行情助手`
 - 用户数据：`%APPDATA%\AI行情助手`

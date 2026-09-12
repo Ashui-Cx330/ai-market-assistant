@@ -1,6 +1,13 @@
 # AI行情助手自动更新与发布
 
-当前代码版本：**v1.11.0（开发中，尚未发布）**。更新仓库：`Ashui-Cx330/ai-market-assistant`。只有在本地构建通过并向 GitHub Release 上传安装包、`.blockmap` 和 `latest.yml` 后，才会成为用户可检测的正式更新；未发布版本不会伪装成线上更新。
+当前正式版本：**v1.12.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。GitHub Release 同时发布 Windows 安装包、`.blockmap` 和 `latest.yml`，旧版客户端可据此检查、下载并安装更新。
+
+## v1.12.0 / Quant Intelligence Engine V2
+
+- 新增57项统一特征目录、市场独立画像、CatBoost研究候选与严格走步模型竞赛。
+- 新增 IC、Rank IC、ICIR、Sharpe、Sortino、最大回撤、Calmar、换手与交易成本指标。
+- 新增 Crypto 7D、No Clear Edge、不确定性原因和不可变完整预测快照。
+- 修复多周期重叠收益被错误复利的问题；新闻/事件未通过Point-in-Time消融前不进入概率。
 
 ## v1.11.0 / 可审计 AI Market Intelligence
 

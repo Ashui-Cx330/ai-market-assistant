@@ -75,10 +75,21 @@ class ModelManager:
         except Exception:return None
 
     def promote_if_better(self, symbol: str, interval: str, horizon: str, candidate: dict) -> tuple[dict,str]:
-        """Replace a V4 model only after an untouched-test improvement."""
+        """Promote V6 candidates on expanding walk-forward evidence, not repeated holdout tuning."""
         existing=self.current(symbol,interval,horizon)
-        if not existing or existing.get("version")!="4.0":
+        schema=candidate.get("version","4.0")
+        if not existing or existing.get("version")!=schema:
             self.save(symbol,interval,horizon,candidate);return candidate,"INITIAL_OR_SCHEMA_UPGRADE"
+        if schema=="6.0":
+            old=existing.get("walk_forward_metrics",{});new=candidate.get("walk_forward_metrics",{})
+            accuracy_gain=float(new.get("accuracy",0))-float(old.get("accuracy",0))
+            f1_gain=float(new.get("f1_macro",0))-float(old.get("f1_macro",0))
+            if accuracy_gain>=.01 and f1_gain>=-.005:
+                self.save(symbol,interval,horizon,candidate);return candidate,"PROMOTED_AFTER_WALK_FORWARD_IMPROVEMENT"
+            existing["fingerprint"]=candidate["fingerprint"]
+            existing["last_candidate_trained_at"]=candidate.get("trained_at")
+            self.save(symbol,interval,horizon,existing)
+            return existing,"RETAINED_PREVIOUS_MODEL_NO_WALK_FORWARD_IMPROVEMENT"
         old=existing.get("ensemble_metrics",{});new=candidate.get("ensemble_metrics",{})
         accuracy_gain=float(new.get("accuracy",0))-float(old.get("accuracy",0))
         brier_gain=float(old.get("brier_score",1))-float(new.get("brier_score",1))

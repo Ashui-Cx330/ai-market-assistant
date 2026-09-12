@@ -28,3 +28,4 @@ work/
 *.pem
 *.pfx
 *.p12
+catboost_info/

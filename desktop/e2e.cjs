@@ -50,8 +50,8 @@ async function run() {
     await page.locator('.ai-score strong').waitFor({ timeout: 60000 })
 
     await nav(page, '模型表现', 'Model Lab')
-    await page.getByText('39.47%').waitFor()
-    await page.getByText('No statistical edge').waitFor()
+    await page.getByText(/Immutable resolved history/).waitFor()
+    await page.getByText(/no random split/).waitFor()
 
     await nav(page, '策略实验室', 'Strategy Lab')
     await page.getByRole('button', { name: '转换为可执行规则' }).click()

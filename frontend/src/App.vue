@@ -7,7 +7,7 @@ import {
   onMounted,
   ref,
 } from "vue";
-import { ElMessage } from "element-plus";
+import { ElMessage } from "element-plus/es/components/message/index";
 import type { Asset, Candle, IndicatorSet, Quote } from "./api";
 import { post, postLong, request } from "./api";
 import { realtimeMarketStore, type RealtimeEvent } from "./realtime";
@@ -35,7 +35,7 @@ type Page =
   | "copilot"
   | "settings";
 const page = ref<Page>("home"),
-  appVersion = ref("1.11.0"),
+  appVersion = ref("1.12.0"),
   pageLoading = ref(false),
   pageError = ref("");
 const dashboard = ref<any>(null),
@@ -1378,7 +1378,9 @@ onBeforeUnmount(() => {
               v-else
               :candles="candles"
               :indicators="indicators"
-              :news="newsIntelligence?.all_news || newsIntelligence?.items || []"
+              :news="
+                newsIntelligence?.all_news || newsIntelligence?.items || []
+              "
               @news-click="openNews"
             />
           </section>
@@ -1451,38 +1453,141 @@ onBeforeUnmount(() => {
         </section>
         <section class="terminal-panel intelligence-panel">
           <header>
-            <div><span>AI MARKET INTELLIGENCE</span><h2>模型概率、证据与事件时间线</h2></div>
-            <button :disabled="marketIntelJob?.status==='RUNNING'||marketIntelJob?.status==='QUEUED'" @click="recalculateMarketIntelligence()">
-              {{ ['RUNNING','QUEUED'].includes(marketIntelJob?.status) ? '后台计算中…' : '运行真实判断' }}
+            <div>
+              <span>AI MARKET INTELLIGENCE</span>
+              <h2>模型概率、证据与事件时间线</h2>
+            </div>
+            <button
+              :disabled="
+                marketIntelJob?.status === 'RUNNING' ||
+                marketIntelJob?.status === 'QUEUED'
+              "
+              @click="recalculateMarketIntelligence()"
+            >
+              {{
+                ["RUNNING", "QUEUED"].includes(marketIntelJob?.status)
+                  ? "后台计算中…"
+                  : "运行真实判断"
+              }}
             </button>
           </header>
-          <div v-if="marketIntelError" class="state-error"><span>{{marketIntelError}}</span><button @click="selected&&loadMarketIntelligence(selected,false)">重试</button></div>
-          <div v-if="marketIntelLoading&&!marketIntel" class="intel-skeleton"><i v-for="n in 3" :key="n"></i></div>
+          <div v-if="marketIntelError" class="state-error">
+            <span>{{ marketIntelError }}</span
+            ><button
+              @click="selected && loadMarketIntelligence(selected, false)"
+            >
+              重试
+            </button>
+          </div>
+          <div v-if="marketIntelLoading && !marketIntel" class="intel-skeleton">
+            <i v-for="n in 3" :key="n"></i>
+          </div>
           <template v-else-if="marketIntel">
-            <div v-if="!marketIntel.periods?.length" class="empty-state large">证据不足：尚无该标的真实校准模型快照。系统已在后台准备，不会用新闻分数冒充概率。</div>
+            <div v-if="!marketIntel.periods?.length" class="empty-state large">
+              证据不足：尚无该标的真实校准模型快照。系统已在后台准备，不会用新闻分数冒充概率。
+            </div>
             <div v-else class="intel-grid">
-              <article v-for="x in marketIntel.periods" :key="x.horizon" class="probability-card">
-                <header><b>{{x.horizon}}</b><span>{{x.trend}} · Evidence {{x.evidence}}</span></header>
-                <div><label>UP</label><i><em :style="{width:x.up+'%'}"></em></i><strong>{{x.up}}%</strong></div>
-                <div><label>SIDEWAYS</label><i><em class="flat" :style="{width:x.sideways+'%'}"></em></i><strong>{{x.sideways}}%</strong></div>
-                <div><label>DOWN</label><i><em class="down" :style="{width:x.down+'%'}"></em></i><strong>{{x.down}}%</strong></div>
-                <small>{{x.model_level}} · {{x.probability_type}}</small>
+              <article
+                v-for="x in marketIntel.periods"
+                :key="x.horizon"
+                class="probability-card"
+              >
+                <header>
+                  <b>{{ x.horizon }}</b
+                  ><span>{{ x.trend }} · Evidence {{ x.evidence }}</span>
+                </header>
+                <div>
+                  <label>UP</label
+                  ><i><em :style="{ width: x.up + '%' }"></em></i
+                  ><strong>{{ x.up }}%</strong>
+                </div>
+                <div>
+                  <label>SIDEWAYS</label
+                  ><i
+                    ><em
+                      class="flat"
+                      :style="{ width: x.sideways + '%' }"
+                    ></em></i
+                  ><strong>{{ x.sideways }}%</strong>
+                </div>
+                <div>
+                  <label>DOWN</label
+                  ><i><em class="down" :style="{ width: x.down + '%' }"></em></i
+                  ><strong>{{ x.down }}%</strong>
+                </div>
+                <small>{{ x.model_level }} · {{ x.probability_type }}</small>
               </article>
               <article class="intel-why">
                 <h3>WHY?</h3>
-                <div v-for="x in marketIntel.contributions" :key="x.factor"><span>{{x.factor}}</span><b :class="tone(x.contribution)">{{x.contribution>0?'+':''}}{{x.contribution}}</b></div>
-                <p v-if="!marketIntel.contributions?.length">缓存记录没有完整特征贡献；重新运行后生成。</p>
-                <small>Market Regime · {{marketIntel.market_regime?.primary||marketIntel.market_regime||'待识别'}}</small>
+                <div v-for="x in marketIntel.contributions" :key="x.factor">
+                  <span>{{ x.factor }}</span
+                  ><b :class="tone(x.contribution)"
+                    >{{ x.contribution > 0 ? "+" : "" }}{{ x.contribution }}</b
+                  >
+                </div>
+                <p v-if="!marketIntel.contributions?.length">
+                  缓存记录没有完整特征贡献；重新运行后生成。
+                </p>
+                <small
+                  >Market Regime ·
+                  {{
+                    marketIntel.market_regime?.primary ||
+                    marketIntel.market_regime ||
+                    "待识别"
+                  }}</small
+                >
               </article>
             </div>
-            <div v-if="marketIntel.why_changed?.length" class="intel-change"><b>⚡ 为什么改变？</b><span v-for="x in marketIntel.why_changed" :key="x.horizon">{{x.horizon}} {{x.from}} → {{x.to}} · UP {{x.up_delta>0?'+':''}}{{x.up_delta}}%</span></div>
-            <div class="intel-meta"><span>更新 {{timeLabel(marketIntel.updated_at||marketIntel.generated_at)}}</span><span>数据截止 {{timeLabel(marketIntel.data_cutoff)}}</span><span>不可变快照 {{marketIntel.immutable_snapshot_count||0}}</span><span>已结算样本 {{marketIntel.track_record?.samples||0}}</span></div>
-            <div class="intelligence-timeline">
-              <header><h3>MARKET INTELLIGENCE TIMELINE</h3><span>新闻仅作情报与重算触发；未通过消融前不混入概率</span></header>
-              <button v-for="x in marketIntel.news_context?.items||[]" :key="x.id" @click="openNews(x)"><time>{{timeLabel(x.published_at)}}</time><b>{{x.event?.event_type||x.category}}</b><span>{{x.title}}</span><em>Impact {{x.impact?.score}} · {{x.sentiment?.label}}</em></button>
-              <p v-if="!marketIntel.news_context?.items?.length">News unavailable / 当前没有可明确关联的新闻，不会生成虚假新闻。</p>
+            <div v-if="marketIntel.why_changed?.length" class="intel-change">
+              <b>⚡ 为什么改变？</b
+              ><span v-for="x in marketIntel.why_changed" :key="x.horizon"
+                >{{ x.horizon }} {{ x.from }} → {{ x.to }} · UP
+                {{ x.up_delta > 0 ? "+" : "" }}{{ x.up_delta }}%</span
+              >
             </div>
-            <div class="intel-boundary"><b>模型边界：</b>{{marketIntel.probability_boundary||marketIntel.prediction_notice}} <button @click="nav('paper')">进入模拟交易 →</button></div>
+            <div class="intel-meta">
+              <span
+                >更新
+                {{
+                  timeLabel(marketIntel.updated_at || marketIntel.generated_at)
+                }}</span
+              ><span>数据截止 {{ timeLabel(marketIntel.data_cutoff) }}</span
+              ><span
+                >不可变快照
+                {{ marketIntel.immutable_snapshot_count || 0 }}</span
+              ><span
+                >已结算样本 {{ marketIntel.track_record?.samples || 0 }}</span
+              >
+            </div>
+            <div class="intelligence-timeline">
+              <header>
+                <h3>MARKET INTELLIGENCE TIMELINE</h3>
+                <span>新闻仅作情报与重算触发；未通过消融前不混入概率</span>
+              </header>
+              <button
+                v-for="x in marketIntel.news_context?.items || []"
+                :key="x.id"
+                @click="openNews(x)"
+              >
+                <time>{{ timeLabel(x.published_at) }}</time
+                ><b>{{ x.event?.event_type || x.category }}</b
+                ><span>{{ x.title }}</span
+                ><em
+                  >Impact {{ x.impact?.score }} · {{ x.sentiment?.label }}</em
+                >
+              </button>
+              <p v-if="!marketIntel.news_context?.items?.length">
+                News unavailable / 当前没有可明确关联的新闻，不会生成虚假新闻。
+              </p>
+            </div>
+            <div class="intel-boundary">
+              <b>模型边界：</b
+              >{{
+                marketIntel.probability_boundary ||
+                marketIntel.prediction_notice
+              }}
+              <button @click="nav('paper')">进入模拟交易 →</button>
+            </div>
           </template>
         </section>
       </section>
@@ -1602,7 +1707,9 @@ onBeforeUnmount(() => {
                 }}</span>
               </header>
               <template v-if="x.prediction"
-                ><strong>{{ x.prediction }}</strong>
+                ><strong>{{
+                  x.actionable_prediction || x.decision_status || x.prediction
+                }}</strong>
                 <div class="prob-bars">
                   <label
                     >UP
@@ -1632,7 +1739,11 @@ onBeforeUnmount(() => {
                   {{ x.walk_forward_samples }} · 最近训练
                   {{ timeLabel(x.trained_at).slice(0, 10) }}</small
                 >
-                <p>{{ x.advantage_message }}</p></template
+                <p>{{ x.advantage_message }}</p>
+                <small v-if="x.uncertainty?.reasons?.length" class="warning"
+                  >不确定性 {{ x.uncertainty.level }} ·
+                  {{ x.uncertainty.reasons.join(" / ") }}</small
+                ></template
               >
               <p v-else>{{ x.message }}</p>
             </article>
@@ -1712,6 +1823,11 @@ onBeforeUnmount(() => {
                 >Precision
                 {{ x.precision == null ? "不可复算" : x.precision }} · Brier
                 {{ x.brier_score == null ? "不可复算" : x.brier_score }}</small
+              ><small
+                >IC {{ x.ic == null ? "不可复算" : x.ic }} · Rank IC
+                {{ x.rank_ic == null ? "不可复算" : x.rank_ic }} · ICIR
+                {{ x.icir == null ? "样本不足" : x.icir }} · Sharpe
+                {{ x.sharpe == null ? "不可复算" : x.sharpe }}</small
               ><small v-if="x.note">{{ x.note }}</small>
             </article>
           </div>

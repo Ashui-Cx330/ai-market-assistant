@@ -25,11 +25,11 @@ $appPath = Join-Path $root 'frontend\src\App.vue'
 $appContent = [IO.File]::ReadAllText($appPath, [Text.Encoding]::UTF8)
 $appUpdated = [Text.RegularExpressions.Regex]::Replace(
   $appContent,
-  "appVersion=ref\('\d+\.\d+\.\d+'\)",
-  "appVersion=ref('$Version')",
+  'appVersion\s*=\s*ref\(["'']\d+\.\d+\.\d+["'']\)',
+  "appVersion = ref(`"$Version`")",
   1
 )
-if ($appUpdated -eq $appContent -and $appContent -notmatch "appVersion=ref\('$([Regex]::Escape($Version))'\)") {
+if ($appUpdated -eq $appContent -and $appContent -notmatch "appVersion\s*=\s*ref\([`"']$([Regex]::Escape($Version))[`"']\)") {
   throw 'Expected appVersion field in frontend/src/App.vue'
 }
 [IO.File]::WriteAllText($appPath, $appUpdated, (New-Object Text.UTF8Encoding($false)))

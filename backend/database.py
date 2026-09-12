@@ -157,13 +157,21 @@ def init_db() -> None:
                 trigger_reason TEXT NOT NULL, payload_json TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_market_intelligence_asset
-                ON market_intelligence_snapshots(symbol,asset_type,generated_at DESC);"""
+                ON market_intelligence_snapshots(symbol,asset_type,generated_at DESC);
+            CREATE TABLE IF NOT EXISTS quant_prediction_snapshots (
+                prediction_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, asset_type TEXT NOT NULL,
+                interval TEXT NOT NULL, data_cutoff TEXT NOT NULL, generated_at TEXT NOT NULL,
+                model_version TEXT NOT NULL, payload_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_quant_snapshot_asset
+                ON quant_prediction_snapshots(symbol,asset_type,generated_at DESC);"""
         )
         prediction_columns={row[1] for row in conn.execute("PRAGMA table_info(prediction_history)")}
         migrations={"prediction_id":"TEXT","model_version":"TEXT","feature_version":"TEXT","risk_reward":"REAL",
                     "expected_value":"REAL","data_quality":"REAL","status":"TEXT DEFAULT 'ACTIVE'",
                     "mae":"REAL","mfe":"REAL","expired_at":"TEXT","invalidation_reason":"TEXT",
                     "strategy_version":"TEXT","tp2":"REAL","probability_calibration":"TEXT"}
+        migrations["failure_reason"]="TEXT"
         for name,sql_type in migrations.items():
             if name not in prediction_columns:conn.execute(f"ALTER TABLE prediction_history ADD COLUMN {name} {sql_type}")
         account_columns={row[1] for row in conn.execute("PRAGMA table_info(paper_accounts)")}
@@ -467,6 +475,28 @@ def save_external_feature_observations(symbol: str, timestamp: str, external: di
     return len(rows)
 
 
+def save_quant_prediction_snapshot(symbol: str, asset_type: str, interval: str, payload: dict) -> str:
+    """Append an immutable, replayable prediction snapshot."""
+    prediction_id=str(payload.get("prediction_id") or uuid.uuid4())
+    cutoff=str(payload.get("data_time") or payload.get("information_cutoff") or "")
+    generated=str(payload.get("predicted_at") or payload.get("generated_at") or pd.Timestamp.utcnow().isoformat())
+    with connection() as conn:
+        conn.execute("""INSERT INTO quant_prediction_snapshots
+            (prediction_id,symbol,asset_type,interval,data_cutoff,generated_at,model_version,payload_json)
+            VALUES(?,?,?,?,?,?,?,?)""",(prediction_id,symbol,asset_type,interval,cutoff,generated,
+            str(payload.get("engine_version") or "unknown"),json.dumps(payload,ensure_ascii=False,default=str)))
+    return prediction_id
+
+
+def quant_prediction_snapshots(symbol: str | None=None, limit: int=100) -> list[dict]:
+    with connection() as conn:
+        if symbol:
+            rows=conn.execute("SELECT * FROM quant_prediction_snapshots WHERE symbol=? ORDER BY generated_at DESC LIMIT ?",(symbol,limit)).fetchall()
+        else:
+            rows=conn.execute("SELECT * FROM quant_prediction_snapshots ORDER BY generated_at DESC LIMIT ?",(limit,)).fetchall()
+    return [dict(row) for row in rows]
+
+
 def save_prediction_history(symbol: str, asset_type: str, interval: str, prediction: dict, decision: dict) -> int:
     saved = 0
     with connection() as conn:
@@ -525,9 +555,13 @@ def resolve_prediction_history(symbol: str, candles: list[dict]) -> int:
                 realized_r = pnl/max(risk,1e-12)
                 mae=float(path["low"].min()/row["entry_price"]-1) if side=="LONG" else float(row["entry_price"]/path["high"].max()-1)
                 mfe=float(path["high"].max()/row["entry_price"]-1) if side=="LONG" else float(row["entry_price"]/path["low"].min()-1)
+            correct=int(actual==row["prediction"]);failure=None
+            if not correct:
+                failure=("VOLATILITY_UNDERESTIMATED" if row["prediction"]=="FLAT" else
+                         "STOP_HIT_BEFORE_TARGET" if stop_hit else "DIRECTIONAL_MISS_UNATTRIBUTED")
             conn.execute("""UPDATE prediction_history SET actual=?,actual_return=?,correct=?,stop_hit=?,tp_hit=?,realized_r=?,
-                         mae=?,mfe=?,status='RESOLVED',expired_at=CURRENT_TIMESTAMP,resolved_at=CURRENT_TIMESTAMP WHERE id=?""",
-                         (actual, actual_return, int(actual==row["prediction"]), int(stop_hit), int(tp_hit), realized_r,mae,mfe,row["id"]))
+                         mae=?,mfe=?,failure_reason=?,status='RESOLVED',expired_at=CURRENT_TIMESTAMP,resolved_at=CURRENT_TIMESTAMP WHERE id=?""",
+                         (actual, actual_return, correct, int(stop_hit), int(tp_hit), realized_r,mae,mfe,failure,row["id"]))
             resolved += 1
     return resolved
 
@@ -549,6 +583,13 @@ def prediction_statistics() -> dict:
             p=tp/max(tp+fp,1);r=tp/max(tp+fn,1);precision.append(p);recall.append(r);f1.append(2*p*r/max(p+r,1e-12))
         one=np.eye(3)[y]; brier=float(np.mean(np.sum((probs-one)**2,axis=1))); loss=float(-np.mean(np.log(np.clip(probs[np.arange(len(y)),y],1e-12,1))))
         rs=[x["realized_r"] for x in items if x["realized_r"] is not None]; wins=sum(v for v in rs if v>0); losses=abs(sum(v for v in rs if v<0))
+        actual_returns=np.asarray([float(x["actual_return"]) for x in items],float)
+        score=probs[:,2]-probs[:,0]
+        ic=float(np.corrcoef(score,actual_returns)[0,1]) if len(items)>2 and np.std(score)>0 and np.std(actual_returns)>0 else None
+        rank_score=pd.Series(score).rank().to_numpy();rank_return=pd.Series(actual_returns).rank().to_numpy()
+        rank_ic=float(np.corrcoef(rank_score,rank_return)[0,1]) if len(items)>2 and np.std(rank_score)>0 and np.std(rank_return)>0 else None
+        r_values=np.asarray(rs,float);r_std=float(r_values.std(ddof=1)) if len(r_values)>1 else 0
+        sharpe=float(np.sqrt(252)*r_values.mean()/r_std) if r_std>0 else None
         confidence=probs.max(axis=1);correct=(pred==y).astype(float);ece=0.0;reliability=[]
         for lower in np.linspace(0,1,11)[:-1]:
             upper=lower+.1;mask=(confidence>=lower)&(confidence<(upper if upper<1 else upper+1e-12))
@@ -559,8 +600,12 @@ def prediction_statistics() -> dict:
                 "recall_macro":round(float(np.mean(recall)),4),"f1_macro":round(float(np.mean(f1)),4),"brier_score":round(brier,4),"log_loss":round(loss,4),
                 "calibration_gap":round(float(np.mean(abs(probs.max(axis=1)-(pred==y)))),4),"ece":round(ece,4),"reliability":reliability,
                 "stop_hit_rate":round(sum(x["stop_hit"] for x in items)/len(items),4),"tp_hit_rate":round(sum(x["tp_hit"] for x in items)/len(items),4),
-                "average_r":round(float(np.mean(rs)),4) if rs else None,"profit_factor":round(wins/losses,4) if losses else None}
-    by_horizon={h:metrics([x for x in rows if x["horizon"]==h]) for h in ("1H","4H","1D")}
+                "average_r":round(float(np.mean(rs)),4) if rs else None,"profit_factor":round(wins/losses,4) if losses else None,
+                "ic":None if ic is None else round(ic,4),"rank_ic":None if rank_ic is None else round(rank_ic,4),
+                "icir":None,"sharpe":None if sharpe is None else round(sharpe,4)}
+
+    horizons=sorted({x["horizon"] for x in rows})
+    by_horizon={h:metrics([x for x in rows if x["horizon"]==h]) for h in horizons}
     regimes=sorted({x["regime"] for x in rows if x["regime"]})
     return {"overall":metrics(rows),"by_horizon":by_horizon,"by_regime":{r:metrics([x for x in rows if x["regime"]==r]) for r in regimes}}
 

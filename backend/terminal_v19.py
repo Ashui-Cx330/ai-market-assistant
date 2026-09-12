@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from .cache import cache
 from .database import (connection, list_watchlist, load_news_intelligence,
                        load_provider_health, query_news_intelligence,
-                       save_news_intelligence, save_provider_health)
+                       save_news_intelligence, save_provider_health, prediction_statistics)
 from .indicators import calculate_indicators, indicator_payload
 from .market import canonical_symbol, crypto_kline, crypto_quote, stock_kline, stock_quote
 from .news_intelligence import build_intelligence, collect_news
@@ -505,24 +505,23 @@ def model_lab(symbol: str | None = None) -> dict:
     for row in rows:
         live.setdefault(row["symbol"],[]).append({"horizon":row["horizon"],"samples":row["samples"],"accuracy":round(float(row["accuracy"])*100,2) if row["accuracy"] is not None else None,
                                                   "mae":round(float(row["mae"])*100,3) if row["mae"] is not None else None,"source":"local resolved prediction history"})
-    audited_nvda=[
-        {"horizon":"T+1","accuracy":39.47,"baseline":None,"edge":None,"assessment":"NO_EDGE","evidence_level":"D — Experimental / No statistical edge","note":"未超过多数类基线；原审计未提供可复核基线数值"},
-        {"horizon":"T+5","accuracy":50.26,"baseline":48.15,"edge":2.11,"assessment":"WEAK_EDGE","evidence_level":"C — Weak historical evidence","note":"缺少逐样本预测和置信区间，不能证明稳定统计优势"},
-        {"horizon":"T+20","accuracy":62.23,"baseline":54.79,"edge":7.44,"assessment":"BETTER_HISTORICAL_EDGE","evidence_level":"C — Historical edge, significance unverified","note":"历史点估计较好，但缺少原始样本、Bootstrap CI 与校准曲线，不能升级为强证据"},
-    ]
-    for period in audited_nvda:
-        period.update({"balanced_accuracy":None,"precision":None,"recall":None,"f1":None,
-                       "directional_accuracy":period["accuracy"],"brier_score":None,"log_loss":None,
-                       "calibration":None,"confidence_interval_95":None})
-    assets=[]
-    for name in ("NVDA","AAPL","TSLA","BTC"):
-        periods=audited_nvda if name=="NVDA" else []
-        assets.append({"symbol":name,"status":"AVAILABLE" if periods or live.get(name) else "INSUFFICIENT_DATA",
-                       "model_version":"5.0 causal ensemble","periods":periods,"resolved_history":live.get(name,[]),
-                       "sample_count":sum(x["samples"] for x in live.get(name,[])),"training_range":None,"test_range":None,
-                       "notice":"缺失指标显示为空，不使用估算值。"})
+    statistics=prediction_statistics();assets=[]
+    for name,history in live.items():
+        periods=[]
+        for item in history:
+            metric=statistics["by_horizon"].get(item["horizon"],{})
+            periods.append({"horizon":item["horizon"],"accuracy":item["accuracy"],"baseline":None,"edge":None,
+                "assessment":"NO_EDGE" if metric.get("samples",0)<100 else "REQUIRES_BENCHMARK",
+                "evidence_level":"D — Experimental" if metric.get("samples",0)<100 else "C — Requires baseline comparison",
+                "precision":metric.get("precision_macro"),"recall":metric.get("recall_macro"),"f1":metric.get("f1_macro"),
+                "brier_score":metric.get("brier_score"),"log_loss":metric.get("log_loss"),"ic":metric.get("ic"),
+                "rank_ic":metric.get("rank_ic"),"icir":metric.get("icir"),"sharpe":metric.get("sharpe"),
+                "confidence_interval_95":None,"note":"仅来自本机不可变结算历史；未达到生产晋级条件。"})
+        assets.append({"symbol":name,"status":"EXPERIMENTAL","model_version":"6.0 Quant Intelligence V2",
+                       "periods":periods,"resolved_history":history,"sample_count":sum(x["samples"] for x in history),
+                       "training_range":None,"test_range":None,"notice":"不再展示旧版静态审计常量；缺失指标保持为空。"})
     if symbol: assets=[x for x in assets if x["symbol"]==symbol.upper()]
-    return {"success":True,"data":{"assets":assets,"validation":"Purged train/calibration/validation/test + walk-forward; audited NVDA figures supplied by the v1.9 product audit",
+    return {"success":True,"data":{"assets":assets,"overall":statistics["overall"],"validation":"Immutable resolved history + purged expanding walk-forward benchmark; no random split and no static showcase metrics",
                                      "generated_at":datetime.now(timezone.utc).isoformat()}}
 
 

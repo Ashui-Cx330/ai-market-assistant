@@ -27,7 +27,8 @@ from .database import (DB_PATH, add_watchlist, cancel_paper_order, connection, c
                        paper_daily_pnl, paper_snapshot, prediction_history, prediction_statistics, remove_watchlist,
                        resolve_prediction_history, save_backtest, save_external_feature_observations,
                        save_feature_observations, save_historical_event_outcomes, save_news_intelligence,
-                       reset_paper_accounts, save_prediction_history, save_provider_health)
+                       reset_paper_accounts, save_prediction_history, save_provider_health,
+                       save_quant_prediction_snapshot, quant_prediction_snapshots)
 from .indicators import indicator_payload
 from .market import (crypto_derivatives, crypto_kline, crypto_onchain, crypto_quote, crypto_search, event_risk,
                      canonical_symbol, cross_validate_quote, macro_context, macro_history, news_context, normalize_crypto, stock_fundamental, stock_kline, stock_quote,
@@ -48,6 +49,9 @@ from .symbol_registry import status as symbol_registry_status
 from .symbol_registry import ensure_seeded as ensure_symbol_registry_seeded
 from .performance import record as record_performance
 from .performance import snapshot as performance_snapshot
+from .quant_v2 import ablation as quant_ablation
+from .quant_v2 import benchmark as quant_benchmark
+from .quant_v2 import feature_catalog
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))["version"]
@@ -141,6 +145,14 @@ class PredictionRequest(BaseModel):
     leverage: float = Field(default=1, ge=1, le=100)
     contract_multiplier: float = Field(default=1, gt=0)
     minimum_lot: float | None = Field(default=None, gt=0)
+
+
+class QuantResearchRequest(BaseModel):
+    symbol: str
+    asset_type: str = Field(pattern="^(stock|crypto)$")
+    interval: str = "1d"
+    horizon: str | None = None
+    folds: int = Field(default=3, ge=2, le=6)
 
 
 class BacktestRequest(BaseModel):
@@ -314,13 +326,21 @@ async def news_backtest(body: NewsBacktestRequest) -> dict:
             await asyncio.to_thread(save_news_intelligence,analyzed,symbol)
     events = load_news_intelligence(symbol)
     data, source = await _kline(body.asset_type, symbol, "1d", 1200)
+    benchmark=[];benchmark_name=None
+    try:
+        if body.asset_type=="stock":
+            benchmark_name="000300" if symbol.split(".")[0].isdigit() else "SPY"
+            benchmark,_=await stock_kline(benchmark_name,"1d",1200)
+        elif symbol not in {"BTC","BTCUSDT"}:
+            benchmark_name="BTC";benchmark,_=await crypto_kline("BTC","1d",1200)
+    except Exception:benchmark=[]
     confidence=body.min_confidence/100 if body.min_confidence>1 else body.min_confidence
     result = await asyncio.to_thread(event_backtest, events, data["candles"], body.event_type,
-                                     body.direction, body.min_impact, confidence, body.horizon)
+                                     body.direction, body.min_impact, confidence, body.horizon,benchmark)
     result["persisted_outcomes"]=await asyncio.to_thread(save_historical_event_outcomes,symbol,result["outcomes"])
     result.update({"symbol":symbol,"asset_type":body.asset_type,"interval":"1d","requested_interval":body.interval,
                    "data_source":source,"news_source":"persisted public headlines and exchange announcements",
-                   "historical_provider_statuses":historical_status})
+                   "historical_provider_statuses":historical_status,"benchmark":benchmark_name if benchmark else None})
     return ok(result, "Point-in-Time 新闻事件回测完成", source=source)
 
 
@@ -532,7 +552,11 @@ async def api_predict(body: PredictionRequest) -> dict:
     resolved = await asyncio.to_thread(resolve_prediction_history, symbol, data["candles"])
     saved = await asyncio.to_thread(save_prediction_history, symbol, body.asset_type, body.interval, result, decision)
     result["decision_center"] = decision; result["history"] = {"resolved":resolved,"saved":saved}
-    return ok(result, message="V5 因果技术策略、量化研究审计与交易决策完成", source=source)
+    result["feature_catalog"] = feature_catalog(data["candles"],source)
+    result["information_cutoff"] = result["data_time"]
+    result["snapshot_scope"] = ["price","technical","volume","structure","regime","news","event","fundamental","cross_asset","model_outputs","risk"]
+    result["quant_snapshot_id"] = await asyncio.to_thread(save_quant_prediction_snapshot,symbol,body.asset_type,body.interval,result)
+    return ok(result, message="Quant Intelligence V2 因果特征、校准模型、风险与审计快照完成", source=source)
 
 
 async def _realtime_prediction(symbol: str, asset_type: str, interval: str, reasons: list[str]) -> dict:
@@ -841,6 +865,34 @@ async def legacy_quote(asset_type: str, symbol: str) -> dict: return await (cryp
 @app.get("/api/search")
 async def legacy_search(q: str = "") -> dict:
     stocks, cryptos = await asyncio.gather(stock_search(q or "000001"), crypto_search(q or "BTC")); return {"items": stocks+cryptos}
+
+
+@app.get("/api/quant-v2/features/{asset_type}/{symbol}")
+async def quant_features(asset_type: str, symbol: str, interval: str="1d") -> dict:
+    canonical=resolved_symbol(symbol,asset_type);data,source=await _kline(asset_type,canonical,interval,1200)
+    return ok(feature_catalog(data["candles"],source),source=source)
+
+
+@app.post("/api/quant-v2/benchmark")
+@serialized_prediction
+async def quant_benchmark_api(body: QuantResearchRequest) -> dict:
+    canonical=resolved_symbol(body.symbol,body.asset_type);data,source=await _kline(body.asset_type,canonical,body.interval,1200)
+    result=await asyncio.to_thread(quant_benchmark,data["candles"],body.asset_type,canonical,body.interval,body.horizon,body.folds)
+    return ok(result,message="严格时间顺序模型竞赛完成",source=source)
+
+
+@app.post("/api/quant-v2/ablation")
+@serialized_prediction
+async def quant_ablation_api(body: QuantResearchRequest) -> dict:
+    canonical=resolved_symbol(body.symbol,body.asset_type);data,source=await _kline(body.asset_type,canonical,body.interval,1200)
+    horizon=body.horizon or "1D"
+    result=await asyncio.to_thread(quant_ablation,data["candles"],body.asset_type,canonical,body.interval,horizon)
+    return ok(result,message="同一时间区间特征消融完成",source=source)
+
+
+@app.get("/api/quant-v2/snapshots")
+def quant_snapshots(symbol: str | None=None,limit: int=Query(default=100,ge=1,le=500)) -> dict:
+    return ok(quant_prediction_snapshots(symbol,limit),source="immutable local SQLite snapshots")
 
 
 DIST = Path(os.environ.get("TRADING_AI_FRONTEND_DIR", ROOT / "frontend" / "dist"))

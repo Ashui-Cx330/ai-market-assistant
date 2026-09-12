@@ -9,7 +9,7 @@ import pandas as pd
 UTC = timezone.utc
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 INTERVAL_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
-HORIZON_MINUTES = {"1H": 60, "4H": 240, "1D": 1440, "T+5": 7200, "T+20": 28800}
+HORIZON_MINUTES = {"1H": 60, "4H": 240, "1D": 1440, "7D": 10080, "T+5": 7200, "T+20": 28800}
 
 
 def utc_timestamps(values: list[dict] | list[str]) -> pd.DatetimeIndex:
@@ -30,6 +30,10 @@ def supported_horizons(interval: str) -> dict[str, int]:
     result: dict[str, int] = {}
     for label, duration in HORIZON_MINUTES.items():
         if label in {"T+5","T+20"} and interval != "1d": continue
+        if label == "7D" and interval != "1d": continue
+        if label == "7D" and bar >= 1440:
+            result[label] = 7
+            continue
         if duration >= bar and duration % bar == 0:
             result[label] = duration // bar
     return result

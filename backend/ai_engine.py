@@ -19,9 +19,20 @@ from .indicators import calculate_indicators
 from .model_manager import ModelManager
 
 CLASSES = np.array([-1, 0, 1])
-FEATURES = ["return_1", "return_3", "return_5", "rsi", "macd", "macd_signal", "atr", "volume_change",
-            "volatility", "ma5_gap", "ma20_gap", "boll_position", "flow_pressure", "sentiment_score",
-            "causal_bos", "fvg_imbalance", "fib_0618_distance"]
+FEATURE_GROUPS = {
+    "price": ["return_1", "return_3", "return_5", "return_10", "return_20", "log_return", "gap",
+              "high_low_range", "close_open", "true_range", "realized_volatility", "historical_volatility",
+              "high_position_20", "high_position_60", "high_position_120"],
+    "technical": ["rsi", "rsi_slope", "macd", "macd_signal", "macd_hist", "macd_slope", "atr", "adx",
+                  "cci", "stoch_k", "williams_r", "roc", "mfi", "boll_position", "boll_width",
+                  "ema5_gap", "ema10_gap", "ma20_gap", "ema50_gap", "ema100_gap", "ema200_gap", "ema20_slope"],
+    "volume": ["volume_change", "volume_ratio", "volume_zscore", "relative_volume", "obv_change",
+               "money_flow", "price_volume_corr", "vwap_deviation", "volume_trend", "volume_divergence",
+               "abnormal_volume", "flow_pressure"],
+    "structure": ["causal_bos", "fvg_imbalance", "fib_0618_distance"],
+    "regime": ["volatility", "regime_trend", "regime_high_vol", "regime_risk_on", "sentiment_score"],
+}
+FEATURES = [name for group in FEATURE_GROUPS.values() for name in group]
 FEATURE_LABELS = {
     "return_1": "短期价格动量", "return_3": "3 周期动量", "return_5": "5 周期动量",
     "rsi": "RSI 强弱", "macd": "MACD 趋势", "macd_signal": "MACD 信号线", "atr": "ATR 波动",
@@ -30,6 +41,8 @@ FEATURE_LABELS = {
     "flow_pressure": "量价资金压力", "sentiment_score": "市场情绪得分",
     "causal_bos": "因果结构突破", "fvg_imbalance": "三K线FVG方向", "fib_0618_distance": "因果Swing 0.618距离",
 }
+for _feature in FEATURES:
+    FEATURE_LABELS.setdefault(_feature, _feature.replace("_", " ").title())
 
 
 def feature_frame(candles: list[dict]) -> pd.DataFrame:
@@ -39,6 +52,44 @@ def feature_frame(candles: list[dict]) -> pd.DataFrame:
     frame["ma20_gap"] = frame["close"] / frame["ma20"] - 1
     width = (frame["boll_upper"] - frame["boll_lower"]).replace(0, np.nan)
     frame["boll_position"] = (frame["close"] - frame["boll_lower"]) / width
+    close, open_, high, low, volume = (frame[x].astype(float) for x in ("close", "open", "high", "low", "volume"))
+    previous = close.shift(1)
+    frame["return_10"] = close.pct_change(10); frame["return_20"] = close.pct_change(20)
+    frame["log_return"] = np.log(close / previous); frame["gap"] = open_ / previous - 1
+    frame["high_low_range"] = (high-low) / previous; frame["close_open"] = close/open_ - 1
+    frame["true_range"] = pd.concat([(high-low),(high-previous).abs(),(low-previous).abs()],axis=1).max(axis=1) / previous
+    frame["realized_volatility"] = frame["log_return"].rolling(20).std() * np.sqrt(252)
+    frame["historical_volatility"] = frame["return_1"].rolling(60).std() * np.sqrt(252)
+    for window in (20,60,120):
+        lo,hi=low.rolling(window).min(),high.rolling(window).max()
+        frame[f"high_position_{window}"]=(close-lo)/(hi-lo).replace(0,np.nan)
+    for window in (5,10,20,50,100,200):
+        ema=close.ewm(span=window,adjust=False).mean(); frame[f"ema{window}"]=ema
+        frame[f"ema{window}_gap"]=close/ema-1
+    frame["rsi_slope"]=frame["rsi"].diff(3)/3; frame["macd_slope"]=frame["macd"].diff(3)/3
+    frame["ema20_slope"]=frame["ema20"].pct_change(5)/5; frame["boll_width"]=width/frame["boll_mid"]
+    typical=(high+low+close)/3; mean_dev=typical.rolling(20).apply(lambda x: np.mean(np.abs(x-x.mean())),raw=True)
+    frame["cci"]=(typical-typical.rolling(20).mean())/(.015*mean_dev.replace(0,np.nan))
+    low14,high14=low.rolling(14).min(),high.rolling(14).max()
+    frame["stoch_k"]=(close-low14)/(high14-low14).replace(0,np.nan)*100
+    frame["williams_r"]=(high14-close)/(high14-low14).replace(0,np.nan)*-100
+    frame["roc"]=close.pct_change(12)*100
+    signed_flow=typical*volume*np.sign(typical.diff()).fillna(0)
+    positive=signed_flow.clip(lower=0).rolling(14).sum(); negative=(-signed_flow.clip(upper=0)).rolling(14).sum()
+    frame["mfi"]=100-100/(1+positive/negative.replace(0,np.nan))
+    frame["volume_zscore"]=(volume-volume.rolling(20).mean())/volume.rolling(20).std().replace(0,np.nan)
+    frame["relative_volume"]=volume/volume.rolling(60).median().replace(0,np.nan)
+    frame["obv_change"]=frame["obv"].pct_change(5).replace([np.inf,-np.inf],np.nan)
+    frame["money_flow"]=(typical*volume).pct_change(5)
+    frame["price_volume_corr"]=frame["return_1"].rolling(20).corr(volume.pct_change())
+    rolling_vwap=(typical*volume).rolling(20).sum()/volume.rolling(20).sum().replace(0,np.nan)
+    frame["vwap_deviation"]=close/rolling_vwap-1; frame["volume_trend"]=volume.rolling(5).mean()/volume.rolling(20).mean()-1
+    frame["volume_divergence"]=np.sign(close.pct_change(5))*-np.sign(volume.pct_change(5))
+    frame["abnormal_volume"]=(frame["volume_zscore"].abs()>2).astype(float)
+    frame["regime_trend"]=np.tanh(frame["ema20_slope"]*100)
+    causal_vol=frame["volatility"].shift(1).rolling(120,min_periods=30).quantile(.75)
+    frame["regime_high_vol"]=(frame["volatility"]>causal_vol).astype(float)
+    frame["regime_risk_on"]=np.where((frame["ema20_gap"]>0)&(frame["return_20"]>0),1,np.where((frame["ema20_gap"]<0)&(frame["return_20"]<0),-1,0))
     structure = _causal_structure_features(frame)
     for column in structure:
         frame[column] = structure[column]
@@ -74,7 +125,10 @@ def _causal_structure_features(frame: pd.DataFrame, left: int = 3, right: int = 
 
 def _asset_profile(asset_type: str, symbol: str, frame: pd.DataFrame) -> dict:
     if asset_type == "stock":
-        return {"name":"A_SHARE","max_depth":7,"min_leaf":5,"subsample":.82,"confidence_factor":1.0,"slippage_factor":1.0}
+        clean=symbol.upper().split(".")[0]
+        name="CN_EQUITY" if clean.isdigit() else "US_EQUITY"
+        return {"name":name,"max_depth":7,"min_leaf":5,"subsample":.82,"confidence_factor":1.0,"slippage_factor":1.0,
+                "market_rules":{"t_plus_one":name=="CN_EQUITY","price_limit":"board-dependent" if name=="CN_EQUITY" else None}}
     clean=symbol.upper().replace("/USDT","").replace("-USDT","")
     if clean=="BTC": name,factor="BTC",1.0
     elif clean=="ETH": name,factor="ETH",.97
@@ -99,7 +153,10 @@ def _model_factories(profile: dict | None = None) -> tuple[dict[str, Callable[[]
     }
     unavailable: dict[str, str] = {
         "LSTM": "disabled: deep model is not justified for the current per-asset sample size",
+        "GRU": "disabled: deep model is not justified for the current per-asset sample size",
+        "TFT": "disabled: no validated multivariate dataset and insufficient samples",
         "Transformer": "disabled: deep model is not justified for the current per-asset sample size",
+        "NewsPriceDualStream": "experimental: point-in-time historical news vectors are insufficient",
     }
     try:
         from xgboost import XGBClassifier
@@ -115,14 +172,17 @@ def _model_factories(profile: dict | None = None) -> tuple[dict[str, Callable[[]
                                                          n_jobs=2, verbosity=-1)
     except Exception as exc:
         unavailable["LightGBM"] = type(exc).__name__
-    try:
-        from catboost import CatBoostClassifier
-        factories["CatBoost"] = lambda: CatBoostClassifier(iterations=180, depth=max(4, profile["max_depth"]-2),
-                                                              learning_rate=.045, loss_function="MultiClass",
-                                                              auto_class_weights="Balanced", random_seed=42,
-                                                              verbose=False, thread_count=2)
-    except Exception as exc:
-        unavailable["CatBoost"] = f"optional dependency unavailable: {type(exc).__name__}"
+    if profile.get("research_mode"):
+        try:
+            from catboost import CatBoostClassifier
+            factories["CatBoost"] = lambda: CatBoostClassifier(iterations=120, depth=max(4, profile["max_depth"]-2),
+                                                                  learning_rate=.05, loss_function="MultiClass",
+                                                                  auto_class_weights="Balanced", random_seed=42,
+                                                                  verbose=False, thread_count=2,allow_writing_files=False)
+        except Exception as exc:
+            unavailable["CatBoost"] = f"optional dependency unavailable: {type(exc).__name__}"
+    else:
+        unavailable["CatBoost"]="available in Quant Lab; excluded from interactive prediction latency path"
     return factories, unavailable
 
 
@@ -368,7 +428,7 @@ def _fingerprint(frame: pd.DataFrame, interval: str, horizon: str, profile: str)
     latest = pd.Timestamp(frame["timestamp_utc"].iloc[-1])
     refresh = "1h" if interval in {"1m", "5m"} else "4h" if interval != "1d" else "1d"
     training_bucket = latest.floor(refresh)
-    value = f"v5.0-causal-structure-purged-regime|{profile}|{interval}|{horizon}|{training_bucket}"
+    value = f"v6.0-quant-v2-alpha-features-purged-regime|{profile}|{interval}|{horizon}|{training_bucket}"
     return hashlib.sha256(value.encode()).hexdigest()
 
 
@@ -376,6 +436,9 @@ def predict(candles: list[dict], interval: str = "1h", asset_type: str = "crypto
     frame = feature_frame(candles)
     if len(frame) < 180: raise ValueError("历史数据不足，V2 至少需要 180 根 K 线")
     horizons = supported_horizons(interval)
+    if asset_type == "stock": horizons.pop("7D", None)
+    else:
+        horizons.pop("T+5", None); horizons.pop("T+20", None)
     if not horizons: raise ValueError(f"{interval} 无法严格表达 1H/4H/1D 中的任一目标")
     availability = FeatureStore().availability(frame, asset_type)
     asset_profile = _asset_profile(asset_type, symbol, frame)
@@ -406,7 +469,7 @@ def predict(candles: list[dict], interval: str = "1h", asset_type: str = "crypto
             ensemble_metrics = _metrics(y.iloc[te0:te1], ensemble_test)
             walk_metrics, walk_samples = _walk_forward(x, y, alignment, asset_profile)
             baselines = _baseline_metrics(x.iloc[te0:te1], y.iloc[tr0:tr1], y.iloc[te0:te1])
-            candidate = {"fingerprint": fingerprint, "version": "4.0", "models": fitted, "model_details": details,
+            candidate = {"fingerprint": fingerprint, "version": "6.0", "models": fitted, "model_details": details,
                         "unavailable_models": unavailable, "ensemble_metrics": ensemble_metrics,
                         "walk_forward_metrics": walk_metrics, "walk_forward_samples": walk_samples,
                         "baselines": baselines, "sample_count": len(x), "validation_scheme": {
@@ -444,6 +507,14 @@ def predict(candles: list[dict], interval: str = "1h", asset_type: str = "crypto
                                         .15*consensus + .1*calibration_score) * asset_profile["confidence_factor"])
         confidence = "A" if confidence_score >= 85 else "B" if confidence_score >= 70 else "C" if confidence_score >= 55 else "D"
         predicted_class = int(CLASSES[np.argmax(probabilities)])
+        ordered=np.sort(probabilities); probability_edge=float(ordered[-1]-ordered[-2])
+        uncertainty_reasons=[]
+        if consensus<.6: uncertainty_reasons.append("MODEL_DISAGREEMENT")
+        if probability_edge<.08: uncertainty_reasons.append("PROBABILITY_MARGIN_TOO_SMALL")
+        if data_completeness<.8: uncertainty_reasons.append("DATA_QUALITY")
+        if len(x)<300: uncertainty_reasons.append("LIMITED_SAMPLE")
+        if advantage<.03: uncertainty_reasons.append("NO_VALIDATED_BASELINE_EDGE")
+        no_clear_edge=bool(uncertainty_reasons)
         target = future_timestamp(frame["timestamp_utc"].iloc[-1], asset_type, interval, horizon)
         predictions[horizon] = {
             "status": availability["data_status"], "horizon": horizon, "target_duration": horizon,
@@ -468,9 +539,14 @@ def predict(candles: list[dict], interval: str = "1h", asset_type: str = "crypto
             "explanation_method":"validation-weighted tree feature importance", "shap_status":"NOT_AVAILABLE",
             "threshold_percent":round(float(alignment["threshold"].iloc[-1])*100,3), "trained_at":artifact["trained_at"],
             "promotion_decision":artifact.get("promotion_decision","LOADED_CURRENT_MODEL"),
+            "decision_status":"NO_CLEAR_EDGE" if no_clear_edge else "ACTIONABLE_CANDIDATE",
+            "actionable_prediction":None if no_clear_edge else {-1:"DOWN",0:"FLAT",1:"UP"}[predicted_class],
+            "uncertainty":{"level":"HIGH" if len(uncertainty_reasons)>=3 else "MEDIUM" if uncertainty_reasons else "LOW",
+                           "reasons":uncertainty_reasons,"probability_margin":round(probability_edge,4)},
+            "model_level":"EXPERIMENTAL" if advantage<.03 else "PRODUCTION_CANDIDATE",
         }
     if not any(item.get("prediction") for item in predictions.values()): raise ValueError("所有严格时间目标的样本均不足")
-    return {"engine_version":"5.0", "model":{"name":"PerformanceWeightedEnsemble","models":sorted(all_models),
+    return {"engine_version":"6.0 Quant Intelligence V2", "model":{"name":"PerformanceWeightedEnsemble","ensemble_method":"validation-weighted calibrated probabilities","models":sorted(all_models),
              "asset_profile":asset_profile,
              "training_status":"retrained" if any_retrained else "loaded_from_disk", "split":"Purged Train / Calibration / Validation / untouched Test + horizon embargo",
              "walk_forward":True, "purged_cv":True, "embargo":True}, "predictions":predictions, "feature_availability":availability,

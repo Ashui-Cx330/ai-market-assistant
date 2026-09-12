@@ -43,6 +43,8 @@ Write-Output '[3/5] Freezing hidden backend service'
   --distpath "$root\backend-dist" --workpath "$root\work\pyinstaller" --specpath "$root\work" `
   --collect-binaries xgboost --collect-data xgboost --hidden-import xgboost.sklearn `
   --collect-binaries lightgbm --collect-data lightgbm --hidden-import lightgbm.sklearn `
+  --collect-binaries catboost --hidden-import catboost.core `
+  --exclude-module catboost.widget --exclude-module matplotlib --exclude-module plotly --exclude-module tkinter `
   --add-data "$root\version.json;." `
   "$root\backend\desktop_server.py"
 if ($LASTEXITCODE -ne 0) { throw 'Backend executable build failed' }
