@@ -35,7 +35,7 @@ type Page =
   | "copilot"
   | "settings";
 const page = ref<Page>("home"),
-  appVersion = ref("1.12.0"),
+  appVersion = ref("1.12.1"),
   pageLoading = ref(false),
   pageError = ref("");
 const dashboard = ref<any>(null),

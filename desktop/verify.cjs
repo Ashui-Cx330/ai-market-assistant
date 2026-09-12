@@ -7,6 +7,10 @@ const updatePolicy = require('./update-policy.cjs')
 const required = ['frontend/dist/index.html', 'backend/main.py', '.venv/Scripts/pythonw.exe', 'desktop/assets/app-icon.ico', 'desktop/update-policy.cjs']
 const missing = required.filter(file => !fs.existsSync(path.join(root, file)))
 if (desktop.version !== release.version) throw new Error(`版本不一致: desktop=${desktop.version}, root=${release.version}`)
+const main = fs.readFileSync(path.join(root, 'desktop/main.cjs'), 'utf8')
+if (!main.includes("existing?.version === app.getVersion()") || !main.includes('stopStaleManagedBackend')) {
+  throw new Error('缺少桌面端与后端版本握手/旧服务切换保护')
+}
 if (missing.length) throw new Error(`缺少运行文件: ${missing.join(', ')}`)
 if (desktop.build.appId !== 'com.tradingai.marketassistant') throw new Error('appId 不得在升级版本之间变化。')
 if (desktop.build.nsis.shortcutName !== desktop.productName || desktop.build.nsis.createDesktopShortcut !== 'always') throw new Error('桌面快捷方式配置无效。')

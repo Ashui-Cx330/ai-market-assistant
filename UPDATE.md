@@ -1,6 +1,11 @@
 # AI行情助手自动更新与发布
 
-当前正式版本：**v1.12.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。GitHub Release 同时发布 Windows 安装包、`.blockmap` 和 `latest.yml`，旧版客户端可据此检查、下载并安装更新。
+当前正式版本：**v1.12.1**。更新仓库：`Ashui-Cx330/ai-market-assistant`。GitHub Release 同时发布 Windows 安装包、`.blockmap` 和 `latest.yml`，旧版客户端可据此检查、下载并安装更新。
+
+## v1.12.1 / 后端版本握手热修复
+
+- 桌面端只复用与自身版本完全一致的本地后端。
+- 检测到安装更新后残留的旧版受管服务时，核验进程身份后安全切换到新版，避免新界面误连旧接口。
 
 ## v1.12.0 / Quant Intelligence Engine V2
 

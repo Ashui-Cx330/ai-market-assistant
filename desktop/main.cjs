@@ -45,15 +45,45 @@ function projectRoot() {
   return app.isPackaged ? path.join(process.resourcesPath, 'app') : path.resolve(__dirname, '..')
 }
 
-async function serviceReady() {
+async function serviceHealth() {
   try {
     const response = await fetch(`${SERVICE_URL}/api/health`, { signal: AbortSignal.timeout(5000) })
-    if (!response.ok) return false
+    if (!response.ok) return null
     const result = await response.json()
     return result.status === 'ok' && result.service === APP_NAME && result.database === 'ok' && result.frontend === 'ok'
+      ? result
+      : null
   } catch {
+    return null
+  }
+}
+
+async function serviceReady() {
+  const result = await serviceHealth()
+  return Boolean(result && result.version === app.getVersion())
+}
+
+function stopStaleManagedBackend() {
+  if (process.platform !== 'win32') return false
+  const probe = spawnSync('netstat', ['-ano', '-p', 'tcp'], { windowsHide: true, encoding: 'utf8' })
+  const listening = String(probe.stdout || '').split(/\r?\n/).find(line => {
+    const fields = line.trim().split(/\s+/)
+    return fields.length >= 5 && fields[1]?.endsWith(`:${SERVICE_PORT}`) && fields[3] === 'LISTENING'
+  })
+  const pid = Number(listening?.trim().split(/\s+/).at(-1))
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  const lookup = spawnSync('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-Command',
+    `[Console]::OutputEncoding=[Text.Encoding]::UTF8; (Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\").ExecutablePath`
+  ], { windowsHide: true, encoding: 'utf8' })
+  const executable = String(lookup.stdout || '').trim()
+  if (path.basename(executable).toLowerCase() !== 'ai行情助手服务.exe'.toLowerCase()) {
+    log(`refusing to stop foreign process on ${SERVICE_URL}: pid=${pid}, executable=${executable || 'unknown'}`)
     return false
   }
+  log(`stopping stale managed backend: pid=${pid}, executable=${executable}`)
+  const stopped = spawnSync('taskkill', ['/pid', String(pid), '/t', '/f'], { windowsHide: true, stdio: 'ignore' })
+  return stopped.status === 0
 }
 
 function startBackend() {
@@ -89,7 +119,14 @@ function stopBackend() {
 }
 
 async function ensureBackend() {
-  if (await serviceReady()) return
+  const existing = await serviceHealth()
+  if (existing?.version === app.getVersion()) return
+  if (existing) {
+    log(`backend version mismatch: desktop=${app.getVersion()}, service=${existing.version || 'unknown'}`)
+    if (!stopStaleManagedBackend()) {
+      throw new Error(`检测到旧版或冲突的本地服务 v${existing.version || 'unknown'}，无法安全切换到 v${app.getVersion()}。`)
+    }
+  }
   startBackend()
   for (let attempt = 0; attempt < 120; attempt += 1) {
     await new Promise(resolve => setTimeout(resolve, 500))
