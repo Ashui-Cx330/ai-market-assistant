@@ -25,11 +25,13 @@ from .database import (DB_PATH, add_watchlist, cancel_paper_order, connection, c
                        fill_limit_order, init_db, list_backtests, list_watchlist,
                        get_news_intelligence, load_news_intelligence, load_provider_health, query_news_intelligence,
                        paper_daily_pnl, paper_snapshot, prediction_history, prediction_statistics, remove_watchlist,
-                       resolve_prediction_history, save_backtest, save_external_feature_observations,
+                       save_backtest, save_external_feature_observations,
                        save_feature_observations, save_historical_event_outcomes, save_news_intelligence,
                        reset_paper_accounts, save_prediction_history, save_provider_health,
                        save_quant_prediction_snapshot, quant_prediction_snapshots,
                        save_quant_research_run, latest_quant_research_runs, quant_model_registry)
+from .audit_v114 import baseline_audit
+from .data_pipeline_v4 import data_hash, store_incremental
 from .indicators import indicator_payload
 from .horizons import supported_horizons
 from .market import (crypto_derivatives, crypto_kline, crypto_onchain, crypto_quote, crypto_search, event_risk,
@@ -49,6 +51,8 @@ from .terminal_v19 import router as terminal_v19_router
 from .symbol_registry import schedule_refresh as schedule_symbol_refresh
 from .symbol_registry import status as symbol_registry_status
 from .symbol_registry import ensure_seeded as ensure_symbol_registry_seeded
+from .universe_v4 import build_universe
+from . import research_jobs
 from .performance import record as record_performance
 from .performance import snapshot as performance_snapshot
 from .quant_v2 import ablation as quant_ablation
@@ -56,6 +60,10 @@ from .quant_v2 import benchmark as quant_benchmark
 from .quant_v2 import feature_catalog
 from .quant_v3 import (LEGACY_EXPERIMENTAL_MODELS, dataset_audit as quant_dataset_audit,
                        model_drift as quant_model_drift, run_research as quant_v3_research)
+from .settlement import (settle_asset as settle_prediction_asset,
+                         settle_pending as settle_all_predictions,
+                         settlement_status as prediction_settlement_status)
+from .symbol_master import alias_search as symbol_master_search, resolve as resolve_identity
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))["version"]
@@ -63,6 +71,7 @@ _PREDICTION_SEMAPHORE = asyncio.Semaphore(1)
 _INTELLIGENCE_JOBS: dict[str,dict] = {}
 _INTELLIGENCE_TASKS: set[asyncio.Task] = set()
 _QUANT_V3_RESULTS: dict[str, dict] = {}
+_SETTLEMENT_TASK: asyncio.Task | None = None
 
 QUANT_V3_UNIVERSES = {
     "CN": ["600519", "000001", "300750", "000858", "601318"],
@@ -82,17 +91,27 @@ def serialized_prediction(function):
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global _SETTLEMENT_TASK
     init_db()
     _QUANT_V3_RESULTS.update(latest_quant_research_runs())
     await asyncio.to_thread(ensure_symbol_registry_seeded)
     await realtime_manager.start()
     symbol_refresh_task = schedule_symbol_refresh()
+    async def settlement_loop():
+        await asyncio.sleep(3)
+        while True:
+            try: await _run_global_settlement()
+            except Exception: pass
+            await asyncio.sleep(900)
+    _SETTLEMENT_TASK = asyncio.create_task(settlement_loop(), name="prediction-settlement-loop")
     try:
         yield
     finally:
         if symbol_refresh_task and not symbol_refresh_task.done():
             symbol_refresh_task.cancel()
             await asyncio.gather(symbol_refresh_task,return_exceptions=True)
+        if _SETTLEMENT_TASK and not _SETTLEMENT_TASK.done():
+            _SETTLEMENT_TASK.cancel(); await asyncio.gather(_SETTLEMENT_TASK, return_exceptions=True)
         await realtime_manager.stop()
 
 
@@ -125,6 +144,19 @@ def ok(data=None, message="成功", source=None) -> dict:
 
 def resolved_symbol(symbol: str, asset_type: str) -> str:
     return canonical_symbol(symbol, asset_type.lower())
+
+
+async def _settlement_fetcher(row: dict, identity) -> tuple[list[dict], str]:
+    if identity.asset_type == "crypto":
+        candles,source=await crypto_kline(identity.provider_symbol, row["interval"], 3000, True)
+    else:
+        candles,source=await stock_kline(identity.canonical_symbol, row["interval"], 3000, True)
+    await asyncio.to_thread(store_incremental,identity.canonical_symbol,identity.asset_type,row["interval"],candles,source)
+    return candles,source
+
+
+async def _run_global_settlement() -> dict:
+    return await settle_all_predictions(_settlement_fetcher)
 
 
 @app.exception_handler(HTTPException)
@@ -171,7 +203,7 @@ class QuantV3Request(BaseModel):
     market: str = Field(default="US", pattern="^(CN|US|CRYPTO)$")
     interval: str = Field(default="1d", pattern="^(1h|4h|1d)$")
     horizon: str | None = None
-    symbols: list[str] | None = Field(default=None, min_length=3, max_length=20)
+    symbols: list[str] | None = Field(default=None, min_length=3, max_length=500)
 
 
 class BacktestRequest(BaseModel):
@@ -458,6 +490,17 @@ def api_symbol_registry_status() -> dict:
     return ok(symbol_registry_status(), source="local persistent symbol registry")
 
 
+@app.get("/api/v1.14/baseline-audit")
+def api_v114_baseline_audit() -> dict:
+    return ok(baseline_audit(), source="active SQLite databases")
+
+
+@app.post("/api/v1.14/universe/{market}")
+async def api_v114_universe(market: str, refresh: bool=False) -> dict:
+    try:return ok(await build_universe(market.upper(), refresh), source="real provider registries")
+    except ValueError as exc:raise HTTPException(400,str(exc)) from exc
+
+
 @app.get("/api/performance/recent")
 def api_performance_recent(limit: int = Query(default=100, ge=1, le=500)) -> dict:
     return ok(performance_snapshot(limit), source="in-process performance ring buffer")
@@ -476,6 +519,9 @@ async def _kline(asset_type: str, symbol: str, interval: str, limit: int):
     elif asset_type == "crypto": candles, source = await crypto_kline(symbol, interval, limit)
     else: raise HTTPException(400, "asset_type 必须是 stock 或 crypto")
     indicators = await asyncio.to_thread(indicator_payload, candles)
+    # An invalid batch never contaminates research storage.  Provider responses
+    # remain usable by the live screen, but the audit result is explicit.
+    await asyncio.to_thread(store_incremental, symbol, asset_type, interval, candles, source)
     return {"symbol": symbol, "asset_type": asset_type, "interval": interval, "candles": candles, "indicators": indicators}, source
 
 
@@ -568,7 +614,12 @@ async def api_predict(body: PredictionRequest) -> dict:
                             {"v5_strategy":{"source":"causal StrategyEngine v5","signals":signed_strengths,
                                             "confluence":decision["technical_strategy"]["confluence"]["score"]}},
                             research["data_quality"]["grade"])
-    resolved = await asyncio.to_thread(resolve_prediction_history, symbol, data["candles"])
+    # Resolve this asset immediately, while the independent background engine
+    # scans every pending symbol.  Both paths are idempotent and use observed
+    # market bars instead of a universal timestamp+24h shortcut.
+    resolved = await asyncio.to_thread(
+        settle_prediction_asset, symbol, body.asset_type, body.interval,
+        data["candles"], source)
     saved = await asyncio.to_thread(save_prediction_history, symbol, body.asset_type, body.interval, result, decision)
     result["decision_center"] = decision; result["history"] = {"resolved":resolved,"saved":saved}
     result["feature_catalog"] = feature_catalog(data["candles"],source)
@@ -576,6 +627,28 @@ async def api_predict(body: PredictionRequest) -> dict:
     result["snapshot_scope"] = ["price","technical","volume","structure","regime","news","event","fundamental","cross_asset","model_outputs","risk"]
     result["quant_snapshot_id"] = await asyncio.to_thread(save_quant_prediction_snapshot,symbol,body.asset_type,body.interval,result)
     return ok(result, message="Quant Intelligence V2 因果特征、校准模型、风险与审计快照完成", source=source)
+
+
+@app.get("/api/symbol-master/search")
+def api_symbol_master_search(q: str, asset_type: str | None = None,
+                             limit: int = Query(default=20, ge=1, le=100)) -> dict:
+    return ok(symbol_master_search(q, asset_type, limit), source="persistent registry + canonical identity rules")
+
+
+@app.get("/api/symbol-master/resolve")
+def api_symbol_master_resolve(symbol: str, asset_type: str | None = None) -> dict:
+    return ok(resolve_identity(symbol, asset_type).payload(), source="canonical SymbolMaster")
+
+
+@app.get("/api/predictions/settlement/status")
+def api_prediction_settlement_status() -> dict:
+    return ok(prediction_settlement_status(), source="immutable local prediction history")
+
+
+@app.post("/api/predictions/settlement/run")
+async def api_prediction_settlement_run() -> dict:
+    return ok(await _run_global_settlement(), "全资产预测结算扫描完成",
+              source="observed provider candles + market-aware calendar")
 
 
 async def _realtime_prediction(symbol: str, asset_type: str, interval: str, reasons: list[str]) -> dict:
@@ -981,6 +1054,44 @@ async def quant_v3_research_api(body: QuantV3Request) -> dict:
     result["run_id"] = save_quant_research_run(result)
     _QUANT_V3_RESULTS[body.market] = result
     return ok(result, message="五窗口横截面深度研究完成", source="real market data; point-in-time research")
+
+
+@app.post("/api/quant-v4/research-jobs")
+async def quant_v4_create_job(body: QuantV3Request) -> dict:
+    request=body.model_dump();job=research_jobs.create("run_full_alpha_research",request)
+    async def run():
+        job_id=job["job_id"];research_jobs.update(job_id,"RUNNING",.05)
+        try:
+            if research_jobs.cancelled(job_id):research_jobs.update(job_id,"CANCELLED",0);return
+            horizon=_quant_v3_horizon(body.market,body.interval,body.horizon)
+            universe,sources=await _quant_v3_universe(body);research_jobs.update(job_id,"RUNNING",.3)
+            fingerprint=data_hash(body.market);key=research_jobs.cache_key("alpha-v4",request,fingerprint,"factor-v4","tournament-v4")
+            cached=research_jobs.cache_get(key)
+            if cached:result={**cached,"cache":{"hit":True,"key":key}}
+            else:
+                result=await asyncio.to_thread(quant_v3_research,universe,body.market,body.interval,horizon,5)
+                result["data_sources"]=sources;result["cache"]={"hit":False,"key":key}
+                research_jobs.cache_put(key,fingerprint,"factor-v4","tournament-v4",result)
+            if research_jobs.cancelled(job_id):research_jobs.update(job_id,"CANCELLED",.8);return
+            result["model_drift"]=quant_model_drift(prediction_history(10000))
+            result["run_id"]=save_quant_research_run(result);_QUANT_V3_RESULTS[body.market]=result
+            research_jobs.update(job_id,"COMPLETED",1,result)
+        except Exception as exc:research_jobs.update(job_id,"FAILED",1,error=f"{type(exc).__name__}: {exc}")
+    task=asyncio.create_task(run(),name=f"alpha-v4-{job['job_id']}");_INTELLIGENCE_TASKS.add(task);task.add_done_callback(_INTELLIGENCE_TASKS.discard)
+    return ok(job,"研究任务已入队；UI无需等待")
+
+
+@app.get("/api/quant-v4/research-jobs/{job_id}")
+def quant_v4_get_job(job_id: str) -> dict:
+    job=research_jobs.get(job_id)
+    if not job:raise HTTPException(404,"研究任务不存在")
+    return ok(job,source="SQLite research job queue")
+
+
+@app.post("/api/quant-v4/research-jobs/{job_id}/cancel")
+def quant_v4_cancel_job(job_id: str) -> dict:
+    if not research_jobs.cancel(job_id):raise HTTPException(409,"任务不存在或已结束")
+    return ok({"job_id":job_id,"cancel_requested":True})
 
 
 DIST = Path(os.environ.get("TRADING_AI_FRONTEND_DIR", ROOT / "frontend" / "dist"))

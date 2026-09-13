@@ -6,6 +6,8 @@ import re
 import numpy as np
 import pandas as pd
 import uuid
+import hashlib
+import shutil
 from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
@@ -18,6 +20,28 @@ else:
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 _IMPORT_DB_PATH = DB_PATH
 _INIT_LOCK = RLock()
+SCHEMA_VERSION = "1.14.0"
+
+
+def _backup_before_migration(path: Path) -> Path | None:
+    """Create one recoverable database backup before the v1.14 additive migration."""
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+    try:
+        with sqlite3.connect(path) as probe:
+            exists = probe.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").fetchone()
+            if exists and probe.execute("SELECT 1 FROM schema_migrations WHERE version=?", (SCHEMA_VERSION,)).fetchone():
+                return None
+    except sqlite3.Error:
+        pass
+    backup_dir = path.parent.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / f"trading_ai-pre-v{SCHEMA_VERSION}.db"
+    if not backup.exists():
+        shutil.copy2(path, backup)
+        digest = hashlib.sha256(backup.read_bytes()).hexdigest()
+        backup.with_suffix(".db.sha256").write_text(digest, encoding="ascii")
+    return backup
 
 
 def database_path() -> Path:
@@ -53,6 +77,8 @@ def init_db() -> None:
     # path at nearly the same time.  SQLite has no `ALTER TABLE ... IF NOT
     # EXISTS`, so the schema inspection and ALTER must be one local critical
     # section.  This keeps repeated startup idempotent without deleting data.
+    with _INIT_LOCK:
+        _backup_before_migration(database_path())
     with _INIT_LOCK, connection() as conn:
         conn.execute("PRAGMA busy_timeout=30000")
         conn.execute(
@@ -178,6 +204,56 @@ def init_db() -> None:
                 dataset_version TEXT NOT NULL, training_period TEXT NOT NULL,
                 hyperparameters_json TEXT NOT NULL, validation_metrics_json TEXT NOT NULL,
                 test_metrics_json TEXT NOT NULL, trained_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS symbol_master (
+                canonical_symbol TEXT NOT NULL, market TEXT NOT NULL, exchange TEXT NOT NULL,
+                asset_type TEXT NOT NULL, display_name TEXT NOT NULL, currency TEXT NOT NULL,
+                timezone TEXT NOT NULL, session TEXT NOT NULL, provider_symbol TEXT NOT NULL,
+                aliases TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1,
+                delisted INTEGER NOT NULL DEFAULT 0, sector TEXT, industry TEXT,
+                source TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY(canonical_symbol,market)
+            );
+            CREATE TABLE IF NOT EXISTS research_universes (
+                universe_version TEXT PRIMARY KEY, market TEXT NOT NULL, source TEXT NOT NULL,
+                as_of TEXT NOT NULL, survivorship_status TEXT NOT NULL, member_count INTEGER NOT NULL,
+                payload_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS research_universe_members (
+                universe_version TEXT NOT NULL, canonical_symbol TEXT NOT NULL,
+                effective_from TEXT, effective_to TEXT, active INTEGER NOT NULL DEFAULT 1,
+                metadata_json TEXT NOT NULL, PRIMARY KEY(universe_version,canonical_symbol)
+            );
+            CREATE TABLE IF NOT EXISTS market_candles (
+                market TEXT NOT NULL, canonical_symbol TEXT NOT NULL, interval TEXT NOT NULL,
+                timestamp TEXT NOT NULL, open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL,
+                close REAL NOT NULL, volume REAL NOT NULL, amount REAL, source TEXT NOT NULL,
+                collected_at TEXT NOT NULL, PRIMARY KEY(market,canonical_symbol,interval,timestamp)
+            );
+            CREATE TABLE IF NOT EXISTS prediction_settlement_audit (
+                prediction_id INTEGER NOT NULL, attempted_at TEXT NOT NULL, status TEXT NOT NULL,
+                market TEXT, canonical_symbol TEXT, settlement_timestamp TEXT,
+                settlement_price REAL, source TEXT, reason TEXT, payload_json TEXT NOT NULL,
+                PRIMARY KEY(prediction_id,attempted_at)
+            );
+            CREATE TABLE IF NOT EXISTS research_jobs (
+                job_id TEXT PRIMARY KEY, job_type TEXT NOT NULL, status TEXT NOT NULL,
+                request_json TEXT NOT NULL, progress REAL NOT NULL DEFAULT 0,
+                result_json TEXT, error TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS research_cache (
+                cache_key TEXT PRIMARY KEY, dataset_hash TEXT NOT NULL, feature_hash TEXT NOT NULL,
+                model_hash TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                last_accessed_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS provider_health_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, status TEXT NOT NULL,
+                last_successful_fetch TEXT, last_check TEXT NOT NULL, last_data_timestamp TEXT,
+                latency_ms INTEGER, error_rate REAL, error TEXT, payload_json TEXT NOT NULL
             );"""
         )
         prediction_columns={row[1] for row in conn.execute("PRAGMA table_info(prediction_history)")}
@@ -186,8 +262,19 @@ def init_db() -> None:
                     "mae":"REAL","mfe":"REAL","expired_at":"TEXT","invalidation_reason":"TEXT",
                     "strategy_version":"TEXT","tp2":"REAL","probability_calibration":"TEXT"}
         migrations["failure_reason"]="TEXT"
+        migrations.update({"market":"TEXT", "exchange":"TEXT", "settlement_status":"TEXT",
+                           "settlement_attempted_at":"TEXT", "settlement_source":"TEXT"})
         for name,sql_type in migrations.items():
             if name not in prediction_columns:conn.execute(f"ALTER TABLE prediction_history ADD COLUMN {name} {sql_type}")
+        # Metadata-only backfill for rows created before SymbolMaster existed.
+        # Predictions, probabilities, outcomes and immutable payloads are not changed.
+        conn.execute("""UPDATE prediction_history SET market=CASE
+          WHEN asset_type='crypto' THEN 'CRYPTO'
+          WHEN symbol GLOB '[0-9]*' THEN 'CN' ELSE 'US' END WHERE market IS NULL""")
+        conn.execute("""UPDATE prediction_history SET exchange=CASE
+          WHEN market='CRYPTO' THEN 'OKX'
+          WHEN market='CN' AND (symbol LIKE '6%' OR symbol LIKE '9%') THEN 'SSE'
+          WHEN market='CN' THEN 'SZSE' ELSE 'US' END WHERE exchange IS NULL""")
         account_columns={row[1] for row in conn.execute("PRAGMA table_info(paper_accounts)")}
         if "frozen_cash" not in account_columns:conn.execute("ALTER TABLE paper_accounts ADD COLUMN frozen_cash REAL NOT NULL DEFAULT 0")
         position_columns={row[1] for row in conn.execute("PRAGMA table_info(paper_positions)")}
@@ -207,6 +294,7 @@ def init_db() -> None:
                 "INSERT INTO watchlist(symbol, asset_type) VALUES (?, ?)",
                 [("600519", "stock"), ("300750", "stock"), ("BTC", "crypto"), ("ETH", "crypto")],
             )
+        conn.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES(?)", (SCHEMA_VERSION,))
 
 
 def save_news_intelligence(items: list[dict], symbol: str | None = None) -> int:
@@ -305,15 +393,57 @@ def save_provider_health(statuses: list[dict]) -> None:
     checked=datetime.now(timezone.utc).isoformat()
     with connection() as conn:
         for row in statuses:
+            raw_status=str(row.get("status") or "ERROR").upper()
+            normalized={"HEALTHY":"CONNECTED","CONNECTED":"CONNECTED","PARTIAL":"DEGRADED",
+                        "DEGRADED":"DEGRADED","ERROR":"ERROR","DISCONNECTED":"DISCONNECTED"}.get(raw_status,"ERROR")
+            previous=conn.execute("SELECT checked_at FROM news_provider_health WHERE provider=? AND status IN ('HEALTHY','CONNECTED')",
+                                  (row["provider"],)).fetchone()
+            last_success=checked if normalized == "CONNECTED" else (previous[0] if previous else None)
             conn.execute("""INSERT OR REPLACE INTO news_provider_health
                 (provider,status,item_count,latency_ms,error,markets,checked_at) VALUES(?,?,?,?,?,?,?)""",
                 (row["provider"],row["status"],row.get("count",0),row.get("latency_ms"),row.get("error"),
                  json.dumps(row.get("markets",[]),ensure_ascii=False),checked))
+            conn.execute("""INSERT INTO provider_health_events
+                (provider,status,last_successful_fetch,last_check,last_data_timestamp,latency_ms,error_rate,error,payload_json)
+                VALUES(?,?,?,?,?,?,?,?,?)""",(row["provider"],normalized,last_success,checked,
+                row.get("last_data_timestamp"),row.get("latency_ms"),0.0 if normalized=="CONNECTED" else 1.0,
+                row.get("error"),json.dumps(row,ensure_ascii=False)))
 
 
 def load_provider_health() -> list[dict]:
     with connection() as conn: rows=conn.execute("SELECT * FROM news_provider_health ORDER BY provider").fetchall()
     return [{**dict(row),"markets":json.loads(row["markets"] or "[]")} for row in rows]
+
+
+def provider_health_snapshot(stale_after_seconds: int = 3600) -> list[dict]:
+    """Return honest provider state; an old successful check is STALE, never CONNECTED."""
+    from datetime import datetime, timezone
+    now=datetime.now(timezone.utc); output=[]
+    with connection() as conn:
+        providers=[row[0] for row in conn.execute("SELECT DISTINCT provider FROM provider_health_events ORDER BY provider")]
+        if not providers:
+            legacy=[dict(row) for row in conn.execute("SELECT * FROM news_provider_health ORDER BY provider")]
+            for item in legacy:
+                raw=str(item.get("status") or "ERROR").upper();checked=item.get("checked_at")
+                status={"HEALTHY":"CONNECTED","CONNECTED":"CONNECTED","PARTIAL":"DEGRADED"}.get(raw,raw if raw in {"DEGRADED","ERROR","DISCONNECTED"} else "ERROR")
+                stamp=pd.Timestamp(checked);stamp=stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+                age=(now-stamp.to_pydatetime()).total_seconds()
+                if status=="CONNECTED" and age>stale_after_seconds:status="STALE"
+                output.append({"provider":item["provider"],"status":status,"last_successful_fetch":checked if raw in {"HEALTHY","CONNECTED"} else None,
+                  "last_check":checked,"last_data_timestamp":None,"latency_ms":item.get("latency_ms"),"error_rate":0.0 if raw in {"HEALTHY","CONNECTED"} else 1.0,
+                  "error":item.get("error"),"freshness_seconds":max(0,round(age)),"payload":item})
+            return output
+        for provider in providers:
+            event=conn.execute("SELECT * FROM provider_health_events WHERE provider=? ORDER BY id DESC LIMIT 1",(provider,)).fetchone()
+            recent=conn.execute("SELECT AVG(CASE WHEN status='CONNECTED' THEN 0.0 ELSE 1.0 END) FROM (SELECT status FROM provider_health_events WHERE provider=? ORDER BY id DESC LIMIT 20)",(provider,)).fetchone()[0]
+            item=dict(event); checked=pd.Timestamp(item["last_check"])
+            checked=checked.tz_localize("UTC") if checked.tzinfo is None else checked.tz_convert("UTC")
+            age=(now-checked.to_pydatetime()).total_seconds()
+            if item["status"]=="CONNECTED" and age>stale_after_seconds:item["status"]="STALE"
+            item["freshness_seconds"]=max(0,round(age));item["error_rate"]=round(float(recent or 0),4)
+            item["payload"]=json.loads(item.pop("payload_json") or "{}")
+            output.append(item)
+    return output
 
 
 def save_historical_event_outcomes(symbol: str, outcomes: list[dict]) -> int:
@@ -494,11 +624,25 @@ def save_quant_prediction_snapshot(symbol: str, asset_type: str, interval: str, 
     prediction_id=str(payload.get("prediction_id") or uuid.uuid4())
     cutoff=str(payload.get("data_time") or payload.get("information_cutoff") or "")
     generated=str(payload.get("predicted_at") or payload.get("generated_at") or pd.Timestamp.utcnow().isoformat())
+    decision=payload.get("decision_center",{});research=decision.get("research",{})
+    market="CRYPTO" if asset_type=="crypto" else "CN" if str(symbol).split(".")[0].isdigit() else "US"
+    snapshot_v4={
+        "predictionId":prediction_id,"asset":symbol,"market":market,"timestamp":generated,"cutoffTime":cutoff,
+        "datasetVersion":research.get("dataset_version") or payload.get("dataset_version") or "LIVE-UNVERSIONED",
+        "featureVersion":decision.get("feature_version") or payload.get("feature_version") or "UNKNOWN",
+        "modelVersion":str(payload.get("engine_version") or "unknown"),
+        "priceSnapshot":{"data_time":payload.get("data_time"),"source":payload.get("data_source")},
+        "technicalSnapshot":decision.get("technical_strategy"),"factorSnapshot":research.get("factor_snapshot"),
+        "marketRegime":decision.get("market_regime"),"newsSnapshot":research.get("news"),
+        "eventSnapshot":research.get("event_risk"),"modelOutputs":payload.get("predictions"),
+        "ensembleOutput":payload.get("model"),"uncertainty":research.get("uncertainty"),
+        "risk":decision.get("risk_plan"),"finalDecision":decision.get("v5_final_decision") or decision.get("decision")}
+    stored={**payload,"prediction_snapshot_v4":snapshot_v4}
     with connection() as conn:
         conn.execute("""INSERT INTO quant_prediction_snapshots
             (prediction_id,symbol,asset_type,interval,data_cutoff,generated_at,model_version,payload_json)
             VALUES(?,?,?,?,?,?,?,?)""",(prediction_id,symbol,asset_type,interval,cutoff,generated,
-            str(payload.get("engine_version") or "unknown"),json.dumps(payload,ensure_ascii=False,default=str)))
+            str(payload.get("engine_version") or "unknown"),json.dumps(stored,ensure_ascii=False,default=str)))
     return prediction_id
 
 
@@ -556,6 +700,8 @@ def quant_model_registry(limit: int = 100) -> list[dict]:
 
 def save_prediction_history(symbol: str, asset_type: str, interval: str, prediction: dict, decision: dict) -> int:
     saved = 0
+    market="CRYPTO" if asset_type=="crypto" else "CN" if str(symbol).split(".")[0].isdigit() else "US"
+    exchange="OKX" if market=="CRYPTO" else "SSE" if str(symbol).endswith(".SH") else "SZSE" if market=="CN" else "US"
     with connection() as conn:
         for horizon, item in prediction["predictions"].items():
             if not item.get("prediction"): continue
@@ -570,14 +716,14 @@ def save_prediction_history(symbol: str, asset_type: str, interval: str, predict
                    symbol,asset_type,interval,horizon,prediction_time,target_time,entry_price,prediction,
                    prob_down,prob_flat,prob_up,threshold,regime,decision,stop_loss,tp1,payload_json,
                    prediction_id,model_version,feature_version,risk_reward,expected_value,data_quality,status,
-                   strategy_version,tp2,probability_calibration)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   strategy_version,tp2,probability_calibration,market,exchange,settlement_status)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (symbol, asset_type, interval, horizon, item["prediction_time"], item["future_timestamp"],
                  decision["support_resistance"]["current_price"], item["prediction"], probs["down"], probs["flat"], probs["up"],
                  item["threshold_percent"] / 100, decision["market_regime"]["primary"], decision["decision"]["action"],
                  decision["risk_plan"]["stop_loss"], decision["take_profits"][0]["price"], json.dumps({"prediction":item,"decision":decision}, ensure_ascii=False),
                  str(uuid.uuid4()),prediction.get("engine_version"),decision.get("feature_version"),rr,ev,quality,"ACTIVE",
-                 technical.get("engine_version"),tp2,"PLATT_SCALING"))
+                 technical.get("engine_version"),tp2,"PLATT_SCALING",market,exchange,"PENDING"))
             saved += int(cursor.rowcount > 0)
     return saved
 

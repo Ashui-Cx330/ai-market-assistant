@@ -113,7 +113,7 @@ def build_panel(universe: dict[str, list[dict]], market: str, interval: str, hor
         raise ValueError(f"{market}/{interval} cannot express {horizon}")
     for symbol, candles in universe.items():
         frame = feature_frame(candles).copy()
-        targets = target_indices(pd.DatetimeIndex(frame["timestamp_utc"]), asset_type, interval, horizon)
+        targets = target_indices(pd.DatetimeIndex(frame["timestamp_utc"]), asset_type, interval, horizon, market)
         future_return, future_drawdown = _future_path(frame, targets)
         frame["symbol"] = symbol
         stamps = pd.to_datetime(frame["timestamp_utc"], utc=True)

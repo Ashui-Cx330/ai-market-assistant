@@ -8,6 +8,7 @@ import pandas as pd
 
 UTC = timezone.utc
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+NEW_YORK = ZoneInfo("America/New_York")
 INTERVAL_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
 HORIZON_MINUTES = {"1H": 60, "4H": 240, "1D": 1440, "7D": 10080, "T+5": 7200, "T+20": 28800}
 
@@ -93,7 +94,25 @@ def add_stock_trading_minutes(value: datetime | pd.Timestamp, minutes: int) -> p
     return cursor.tz_convert(UTC)
 
 
-def future_timestamp(value: datetime | pd.Timestamp, asset_type: str, interval: str, horizon: str) -> pd.Timestamp:
+def add_us_trading_minutes(value: datetime | pd.Timestamp, minutes: int) -> pd.Timestamp:
+    stamp=pd.Timestamp(value);stamp=stamp.tz_localize(NEW_YORK) if stamp.tzinfo is None else stamp.tz_convert(NEW_YORK)
+    remaining=int(minutes);day=stamp.date();cursor=stamp
+    while remaining>0:
+        while day.weekday()>=5:day=_next_weekday(day)
+        session_start=pd.Timestamp(datetime.combine(day,time(9,30)),tz=NEW_YORK)
+        session_end=pd.Timestamp(datetime.combine(day,time(16,0)),tz=NEW_YORK)
+        if cursor<session_start:cursor=session_start
+        elif cursor>=session_end:
+            day=_next_weekday(day);cursor=pd.Timestamp(datetime.combine(day,time(9,30)),tz=NEW_YORK);continue
+        available=max(0,int((session_end-cursor).total_seconds()//60));used=min(remaining,available)
+        cursor+=timedelta(minutes=used);remaining-=used
+        if remaining and cursor>=session_end:
+            day=_next_weekday(day);cursor=pd.Timestamp(datetime.combine(day,time(9,30)),tz=NEW_YORK)
+    return cursor.tz_convert(UTC)
+
+
+def future_timestamp(value: datetime | pd.Timestamp, asset_type: str, interval: str, horizon: str,
+                     market: str | None = None) -> pd.Timestamp:
     if horizon not in supported_horizons(interval):
         raise ValueError(f"{interval} K 线无法严格表达未来 {horizon}")
     stamp = pd.Timestamp(value)
@@ -104,17 +123,20 @@ def future_timestamp(value: datetime | pd.Timestamp, asset_type: str, interval: 
         # Advance by the requested number of daily trading bars. Exchange
         # holidays are resolved by training alignment against observed bars;
         # the future display can conservatively skip weekends only.
-        local = stamp.tz_convert(SHANGHAI)
+        zone=NEW_YORK if market=="US" else SHANGHAI
+        local = stamp.tz_convert(zone)
         target_day=local.date()
         for _ in range(supported_horizons(interval)[horizon]):target_day=_next_weekday(target_day)
-        return pd.Timestamp(datetime.combine(target_day, local.time()), tz=SHANGHAI).tz_convert(UTC)
+        return pd.Timestamp(datetime.combine(target_day, local.time()), tz=zone).tz_convert(UTC)
     if horizon == "1D":
-        local = stamp.tz_convert(SHANGHAI);next_day=_next_weekday(local.date())
-        return pd.Timestamp(datetime.combine(next_day,local.time()),tz=SHANGHAI).tz_convert(UTC)
-    return add_stock_trading_minutes(stamp, HORIZON_MINUTES[horizon])
+        zone=NEW_YORK if market=="US" else SHANGHAI
+        local = stamp.tz_convert(zone);next_day=_next_weekday(local.date())
+        return pd.Timestamp(datetime.combine(next_day,local.time()),tz=zone).tz_convert(UTC)
+    return (add_us_trading_minutes if market=="US" else add_stock_trading_minutes)(stamp,HORIZON_MINUTES[horizon])
 
 
-def target_indices(timestamps: pd.DatetimeIndex, asset_type: str, interval: str, horizon: str) -> np.ndarray:
+def target_indices(timestamps: pd.DatetimeIndex, asset_type: str, interval: str, horizon: str,
+                   market: str | None = None) -> np.ndarray:
     """Return the first real candle at/after every timestamp target, or -1.
 
     Crypto alignment rejects gaps larger than one bar. A-share alignment accepts
@@ -129,7 +151,7 @@ def target_indices(timestamps: pd.DatetimeIndex, asset_type: str, interval: str,
         return result
     bar_delta = timedelta(minutes=int(INTERVAL_MINUTES[interval]))
     for index, stamp in enumerate(timestamps):
-        target = future_timestamp(stamp, asset_type, interval, horizon)
+        target = future_timestamp(stamp, asset_type, interval, horizon, market)
         found = int(timestamps.searchsorted(target, side="left"))
         if found >= len(timestamps) or found <= index:
             continue

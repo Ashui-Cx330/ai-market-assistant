@@ -16,7 +16,8 @@ from pydantic import BaseModel, Field
 from .cache import cache
 from .database import (connection, list_watchlist, load_news_intelligence,
                        load_provider_health, query_news_intelligence,
-                       save_news_intelligence, save_provider_health, prediction_statistics)
+                       save_news_intelligence, save_provider_health, prediction_statistics,
+                       provider_health_snapshot)
 from .indicators import calculate_indicators, indicator_payload
 from .market import canonical_symbol, crypto_kline, crypto_quote, stock_kline, stock_quote
 from .news_intelligence import build_intelligence, collect_news
@@ -527,7 +528,7 @@ def model_lab(symbol: str | None = None) -> dict:
 
 @router.get("/data-health")
 async def data_health() -> dict:
-    providers=load_provider_health(); now=datetime.now(timezone.utc).isoformat()
+    providers=provider_health_snapshot(); now=datetime.now(timezone.utc).isoformat()
     checks=await asyncio.gather(stock_quote("000001"),stock_quote("NVDA"),crypto_quote("BTC"),return_exceptions=True)
     def health(index:int,source:str,mode:str,realtime:str) -> dict:
         value=checks[index]
@@ -537,7 +538,7 @@ async def data_health() -> dict:
         {"name":"A股",**health(0,"东方财富 / 腾讯证券备用","增量轮询","公开行情，交易时段轮询")},
         {"name":"美股",**health(1,"Yahoo Finance public chart API","增量轮询","可能延迟，不是交易所授权逐笔行情")},
         {"name":"Crypto",**health(2,"OKX / Coinbase备用","WebSocket + REST fallback","交易所公开流")},
-        {"name":"News","status":"CONNECTED" if any(x.get("status")=="HEALTHY" for x in providers) else "WARNING","mode":"多源采集 + SQLite缓存","source":"independent public providers","last_update":max((x.get("checked_at") or "" for x in providers),default=""),"details":providers},
+        {"name":"News","status":"CONNECTED" if any(x.get("status")=="CONNECTED" for x in providers) else "STALE" if any(x.get("status")=="STALE" for x in providers) else "DEGRADED","mode":"多源采集 + SQLite缓存","source":"independent public providers","last_update":max((x.get("last_check") or "" for x in providers),default=""),"details":providers},
         {"name":"AI","status":"CONNECTED","mode":"本地模型","source":"scikit-learn ensemble / optional boosters","last_update":now},
     ]
     return {"success":True,"data":{"items":items,"checked_at":now,"database":"SQLite user data directory","notice":"连接状态表示服务链路可用，不代表每个外部源在所有网络环境都无延迟。"}}

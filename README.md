@@ -1,6 +1,6 @@
 # AI行情助手
 
-当前正式版本 v1.13.0 为 Quant Research Pipeline V3：旧模型冻结为 Legacy Experimental Benchmark；新增数据/标签/时间泄露审计、收益回归/动态方向/下行风险三任务、横截面 Alpha、五窗口模型竞赛、因子消融、SHAP、Regime 稳定性、Top/Bottom 10% 与 20% 含成本组合、漂移时间覆盖审计、模型注册表和 Research Dashboard。真实 A股/美股/Crypto 共 10 项验收均完成，结论仍为 `NO EDGE`，`Production Model = NONE`。
+当前正式版本 v1.14.0 为 Alpha Discovery & Data Expansion：新增市场感知的全资产幂等预测结算、SymbolMaster、版本化研究 Universe、增量 K 线校验存储、Provider 新鲜度状态、V4 不可变快照、哈希研究缓存和可取消后台队列。真实审计仍为 `NO EDGE`，`Production Model = NONE`，不会将实验模型自动晋升。
 
 上一正式版本 v1.10.5 已将行情页面改为 stale-while-revalidate，避免后台 SQLite 缓存争用阻塞点击；新闻中心只展示明确关联自选资产的快讯，并生成融合 V5 技术策略、ICT/SMC、FVG/BOS、Fibonacci、ATR 和新闻时间衰减的多空风险报告。
 
@@ -8,7 +8,7 @@
 
 ## Windows 安装
 
-双击 `outputs\desktop\AI-Market-Assistant-Setup-v1.13.0.exe` 完成安装。桌面会出现“AI行情助手”，以后直接双击即可；无需打开项目目录、Python、Node、Docker 或命令行。
+双击 `outputs\desktop\AI-Market-Assistant-Setup-v1.14.0.exe` 完成安装。桌面会出现“AI行情助手”，以后直接双击即可；无需打开项目目录、Python、Node、Docker 或命令行。
 
 - 程序目录：`%LOCALAPPDATA%\Programs\AI行情助手`
 - 用户数据：`%APPDATA%\AI行情助手`

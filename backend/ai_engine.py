@@ -515,7 +515,8 @@ def predict(candles: list[dict], interval: str = "1h", asset_type: str = "crypto
         if len(x)<300: uncertainty_reasons.append("LIMITED_SAMPLE")
         if advantage<.03: uncertainty_reasons.append("NO_VALIDATED_BASELINE_EDGE")
         no_clear_edge=bool(uncertainty_reasons)
-        target = future_timestamp(frame["timestamp_utc"].iloc[-1], asset_type, interval, horizon)
+        market = "CRYPTO" if asset_type == "crypto" else "CN" if str(symbol).split(".")[0].isdigit() else "US"
+        target = future_timestamp(frame["timestamp_utc"].iloc[-1], asset_type, interval, horizon, market)
         predictions[horizon] = {
             "status": availability["data_status"], "horizon": horizon, "target_duration": horizon,
             "bar_interval": interval, "nominal_bar_count": nominal_steps, "prediction_time": frame["timestamp_utc"].iloc[-1].isoformat(),

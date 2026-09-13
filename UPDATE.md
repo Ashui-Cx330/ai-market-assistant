@@ -1,6 +1,13 @@
 # AI行情助手自动更新与发布
 
-当前正式版本：**v1.12.1**。更新仓库：`Ashui-Cx330/ai-market-assistant`。GitHub Release 同时发布 Windows 安装包、`.blockmap` 和 `latest.yml`，旧版客户端可据此检查、下载并安装更新。
+当前正式版本：**v1.14.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。GitHub Release 同时发布 Windows 安装包、`.blockmap` 和 `latest.yml`，旧版客户端可据此检查、下载并安装更新。
+
+## v1.14.0 / Alpha Discovery & Data Expansion
+
+- 新增 SymbolMaster 与 A股/美股/Crypto 交易日历感知的全局预测结算；结算按实际后续 Bar，后台周期重试并保持幂等。
+- 新增版本化 Universe、严格增量 OHLCV 校验存储、Provider `CONNECTED/STALE/DEGRADED/ERROR/DISCONNECTED` 状态。
+- 新增 SQLite 后台研究队列、取消任务、哈希缓存、Prediction Snapshot V4 与 15 份真实数据库驱动的研究报告。
+- 当前真实结论仍为 `NO EDGE`；Production Model 与 Champion 均为 `NONE`。
 
 ## v1.12.1 / 后端版本握手热修复
 

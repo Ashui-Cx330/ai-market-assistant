@@ -22,14 +22,14 @@ YAHOO_INTERVALS={"1m":("1m","7d"),"5m":("5m","1mo"),"15m":("15m","1mo"),"30m":("
 def normalize_stock_symbol(symbol: str) -> str:
     value=symbol.upper().strip().replace("NASDAQ:","").replace("NYSE:","")
     if value.startswith(("SH","SZ")) and len(value)==8:value=value[2:]
-    if value.endswith((".SH",".SZ")):value=value[:-3]
+    if value.endswith((".SH",".SS",".SZ")):value=value[:-3]
     return value
 
 def canonical_symbol(symbol: str, asset_type: str) -> str:
     raw=symbol.upper().strip()
     value=normalize_crypto(symbol) if asset_type=="crypto" else normalize_stock_symbol(symbol)
     if asset_type=="crypto":return value
-    if value.isdigit() and len(value)==6 and (raw.endswith(".SH") or raw.startswith("SH")): return f"{value}.SH"
+    if value.isdigit() and len(value)==6 and (raw.endswith((".SH",".SS")) or raw.startswith("SH")): return f"{value}.SH"
     if value.isdigit() and len(value)==6 and (raw.endswith(".SZ") or raw.startswith("SZ")): return f"{value}.SZ"
     if value.isdigit() and len(value)==6:return f"{value}.{'SH' if value.startswith(('5','6','9')) else 'SZ'}"
     return value
@@ -166,6 +166,17 @@ async def crypto_quote(symbol: str, force_refresh: bool = False) -> dict:
                     "source":"Coinbase（备用）","updated_at":datetime.now(timezone.utc).isoformat()}
             return cache.set(key,result,8)
         except Exception as exc: errors.append(f"Coinbase:{type(exc).__name__}")
+        try:
+            pair=f"{'XBT' if symbol=='BTC' else symbol}USDT"
+            response=await client.get("https://api.kraken.com/0/public/Ticker",params={"pair":pair});response.raise_for_status()
+            payload=response.json();row=next(iter((payload.get("result") or {}).values()))
+            last=float(row["c"][0]);opened=float(row["o"])
+            result={"symbol":symbol,"pair":f"{symbol}/USDT","name":CRYPTO_NAMES.get(symbol,symbol),"asset_type":"crypto","currency":"USDT",
+                    "price":last,"change":last-opened,"change_percent":(last/opened-1)*100 if opened else 0,"open":opened,"previous_close":None,
+                    "high":float(row["h"][1]),"low":float(row["l"][1]),"volume":float(row["v"][1]),"amount":None,
+                    "source":"Kraken（备用）","updated_at":datetime.now(timezone.utc).isoformat()}
+            return cache.set(key,result,8)
+        except Exception as exc:errors.append(f"Kraken:{type(exc).__name__}")
         raise RuntimeError("行情数据获取失败（"+"；".join(errors)+"）")
 
 
@@ -351,6 +362,13 @@ async def crypto_kline(symbol: str, interval: str, limit: int = 400, force_refre
             candles=[{"timestamp":datetime.fromtimestamp(v[0],timezone.utc).isoformat(),"low":float(v[1]),"high":float(v[2]),"open":float(v[3]),"close":float(v[4]),"volume":float(v[5]),"amount":0.0} for v in reversed(rows)]
             if candles:return cache.set(key,(candles[-limit:],"Coinbase（备用）"),20)
         except Exception as exc:errors.append(f"Coinbase:{type(exc).__name__}")
+        try:
+            pair=f"{'XBT' if symbol=='BTC' else symbol}USDT";minutes={"1m":1,"5m":5,"15m":15,"30m":30,"1h":60,"4h":240,"1d":1440}[interval]
+            response=await client.get("https://api.kraken.com/0/public/OHLC",params={"pair":pair,"interval":minutes});response.raise_for_status()
+            payload=response.json().get("result") or {};rows=next((value for key,value in payload.items() if key!="last"),[])
+            candles=[{"timestamp":datetime.fromtimestamp(float(v[0]),timezone.utc).isoformat(),"open":float(v[1]),"high":float(v[2]),"low":float(v[3]),"close":float(v[4]),"volume":float(v[6]),"amount":float(v[6])*float(v[4])} for v in rows]
+            if candles:return cache.set(key,(candles[-limit:],"Kraken（备用）"),20)
+        except Exception as exc:errors.append(f"Kraken:{type(exc).__name__}")
         raise RuntimeError("K线数据获取失败（"+"；".join(errors)+"）")
 
 

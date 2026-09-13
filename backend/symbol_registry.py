@@ -173,11 +173,24 @@ async def _refresh_a_shares(client: httpx.AsyncClient) -> int:
     return count
 
 
+async def _refresh_us(client: httpx.AsyncClient) -> int:
+    """Refresh a broad US listing from Nasdaq's public screener response."""
+    response=await client.get("https://api.nasdaq.com/api/screener/stocks",params={"tableonly":"true","limit":5000,"offset":0,"download":"true"})
+    response.raise_for_status();payload=response.json().get("data") or {};items=(payload.get("rows") or [])
+    rows=[]
+    for item in items:
+        symbol=str(item.get("symbol") or "").strip().upper();name=str(item.get("name") or symbol).strip()
+        if not symbol or any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ.-" for ch in symbol):continue
+        exchange=str(item.get("exchange") or "US")
+        rows.append((symbol,"stock","美股",exchange,name,f"{name}|{symbol}","","","TRADING"))
+    return await asyncio.to_thread(_upsert,rows,"Nasdaq screener")
+
+
 async def refresh() -> dict:
     ensure_seeded(); results={}
     async with httpx.AsyncClient(timeout=12,headers=_HEADERS,follow_redirects=True) as client:
         calls={"Binance exchangeInfo":_refresh_binance(client),"OKX instruments":_refresh_okx(client),
-               "Eastmoney security list":_refresh_a_shares(client)}
+               "Eastmoney security list":_refresh_a_shares(client),"Nasdaq screener":_refresh_us(client)}
         values=await asyncio.gather(*calls.values(),return_exceptions=True)
     with _LOCK, _connect() as conn:
         now=time.time()
@@ -203,3 +216,12 @@ def status() -> dict:
         total=conn.execute("SELECT COUNT(DISTINCT symbol || ':' || asset_type) FROM symbols").fetchone()[0]
         sources=[dict(row) for row in conn.execute("SELECT * FROM registry_meta ORDER BY source")]
     return {"symbols":total,"sources":sources,"database":str(_path())}
+
+
+def list_members(market: str, limit: int = 1000) -> list[dict]:
+    ensure_seeded(); label={"CN":"A股","US":"美股","CRYPTO":"Crypto"}[market]
+    with _LOCK,_connect() as conn:
+        rows=conn.execute("""SELECT symbol,name,asset_type,market,exchange,status,source,updated_at
+          FROM symbols WHERE market=? ORDER BY CASE WHEN status IN ('TRADING','live') THEN 0 ELSE 1 END,
+          symbol LIMIT ?""",(label,limit)).fetchall()
+    return [dict(row) for row in rows]
