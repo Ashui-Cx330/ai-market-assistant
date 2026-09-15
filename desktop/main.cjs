@@ -187,6 +187,18 @@ if (lock) {
     updateState.writeState({ rollbackMessage: null })
   }
   ipcMain.handle('desktop:check-for-updates', () => require('./updater.cjs').checkForUpdates(mainWindow, log, { interactive: true, beforeInstall: stopBackend }))
+  ipcMain.handle('desktop:export-report', async (_event, payload = {}) => {
+    const content = String(payload.content || '')
+    if (!content || Buffer.byteLength(content, 'utf8') > 5 * 1024 * 1024) throw new Error('报告为空或超过 5MB 限制。')
+    const suggested = String(payload.filename || 'AI行情助手-决策简报.md').replace(/[\\/:*?"<>|]/g, '-')
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: '导出研究简报', defaultPath: path.join(app.getPath('documents'), suggested),
+      filters: [{ name: 'Markdown 研究报告', extensions: ['md'] }, { name: '文本文件', extensions: ['txt'] }]
+    })
+    if (result.canceled || !result.filePath) return { status: 'cancelled' }
+    await fs.promises.writeFile(result.filePath, content, 'utf8')
+    return { status: 'saved', path: result.filePath }
+  })
   app.on('second-instance', () => {
     if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus() }
   })

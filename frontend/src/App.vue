@@ -22,6 +22,7 @@ const PerformanceChart = defineAsyncComponent(
 
 type Page =
   | "home"
+  | "briefing"
   | "market"
   | "detail"
   | "watchlist"
@@ -36,13 +37,16 @@ type Page =
   | "copilot"
   | "settings";
 const page = ref<Page>("home"),
-  appVersion = ref("1.14.0"),
+  appVersion = ref("1.15.0"),
   pageLoading = ref(false),
   pageError = ref("");
 const dashboard = ref<any>(null),
   scanner = ref<any>({ rows: [], errors: [] }),
   modelLab = ref<any>(null),
   dataHealth = ref<any>(null);
+const traderBriefing = ref<any>(null),
+  briefingLoading = ref(false),
+  briefingError = ref("");
 const quantDashboard = ref<any>(null),
   quantResult = ref<any>(null),
   quantLoading = ref(false),
@@ -130,6 +134,7 @@ let scannerRequestId = 0;
 let searchTimer: number | null = null;
 let searchController: AbortController | null = null;
 let intelligenceTimer: number | null = null;
+let briefingTimer: number | null = null;
 const intelligenceRequested = new Set<string>();
 
 const selectedKey = computed(() =>
@@ -631,6 +636,71 @@ async function loadWatchReport(asset: Asset) {
       newsReportLoading.value = false;
   }
 }
+async function loadTraderBriefing(refresh = false) {
+  briefingLoading.value = !traderBriefing.value;
+  briefingError.value = "";
+  try {
+    if (refresh) await post<any>("/api/terminal/trader-briefing/refresh", {});
+    traderBriefing.value = await request<any>("/api/terminal/trader-briefing");
+    if (traderBriefing.value.refresh?.status === "RUNNING") {
+      if (briefingTimer) window.clearTimeout(briefingTimer);
+      briefingTimer = window.setTimeout(
+        () => page.value === "briefing" && void loadTraderBriefing(false),
+        2500,
+      );
+    } else if (refresh && traderBriefing.value.refresh?.status === "COMPLETED") {
+      ElMessage.success("自选研究简报已更新");
+    }
+  } catch (e) {
+    briefingError.value = e instanceof Error ? e.message : "决策简报暂不可用";
+  } finally {
+    briefingLoading.value = false;
+  }
+}
+async function acknowledgeBriefingAlert(id: number) {
+  try {
+    await post("/api/terminal/trader-alerts/acknowledge", { alert_id: id });
+    if (traderBriefing.value)
+      traderBriefing.value.alerts = traderBriefing.value.alerts.filter((x: any) => x.id !== id);
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : "提醒处理失败");
+  }
+}
+function briefingMarkdown() {
+  const briefing = traderBriefing.value;
+  const lines = [
+    `# AI行情助手 自选研究简报`,
+    ``,
+    `生成时间：${briefing?.generated_at || "生成中"}`,
+    `研究状态：${briefing?.research_status || "NO EDGE"}`,
+    `生产模型：${briefing?.production_model || "NONE"}`,
+    ``,
+    `> ${briefing?.notice || "仅供研究复核，不构成投资建议。"}`,
+    ``,
+  ];
+  for (const x of briefing?.items || []) {
+    lines.push(`## ${x.name}（${x.symbol}）`);
+    lines.push(`- 决策门：${x.decision_gate}；研究结论：${x.action}；证据等级：${x.evidence_grade}`);
+    lines.push(`- 现价：${x.current_price}；止损/离场线：${x.risk_plan?.exit_line}`);
+    lines.push(`- 下一步：${x.next_action}`);
+    lines.push(`- 数据截止：${x.data_cutoff}；来源：${x.data_source}`);
+    for (const blocker of x.blockers || []) lines.push(`- 限制：${blocker}`);
+    lines.push(``);
+  }
+  return lines.join("\n");
+}
+async function exportBriefing() {
+  if (!traderBriefing.value?.items?.length) return ElMessage.warning("当前没有可导出的已完成简报");
+  const filename = `AI行情助手-自选研究简报-${new Date().toISOString().slice(0, 10)}.md`;
+  if (window.desktopReports) {
+    const result = await window.desktopReports.exportMarkdown({ filename, content: briefingMarkdown() });
+    if (result.status === "saved") ElMessage.success(`报告已保存：${result.path}`);
+    return;
+  }
+  const blob = new Blob([briefingMarkdown()], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob), link = document.createElement("a");
+  link.href = url; link.download = filename; link.click(); URL.revokeObjectURL(url);
+}
 async function loadNews(asset?: Asset, refresh = false) {
   newsLoading.value = true;
   newsError.value = "";
@@ -893,6 +963,7 @@ function handleRealtime(event: RealtimeEvent) {
 }
 const paths: Record<Page, string> = {
   home: "/",
+  briefing: "/briefing",
   market: "/market",
   detail: "/",
   watchlist: "/watchlist",
@@ -924,6 +995,7 @@ async function nav(target: string, route = true) {
     }),
   );
   if (target === "home") await loadHome();
+  if (target === "briefing") await loadTraderBriefing();
   if (target === "market" || target === "screener") await runScanner();
   if (target === "watchlist") await loadWatchlist();
   if (target === "modelLab") await loadModelLab();
@@ -972,6 +1044,7 @@ function restoreRoute() {
   }
   const map: Record<string, Page> = {
     "/": "home",
+    "/briefing": "briefing",
     "/market": "market",
     "/watchlist": "watchlist",
     "/screener": "screener",
@@ -989,6 +1062,7 @@ function restoreRoute() {
 }
 function refresh() {
   if (page.value === "home") void loadHome(true);
+  else if (page.value === "briefing") void loadTraderBriefing(true);
   else if (page.value === "market" || page.value === "screener")
     void runScanner();
   else if (page.value === "news") void loadNews(undefined, true);
@@ -1016,6 +1090,7 @@ onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer);
   if (paperTimer) clearInterval(paperTimer);
   if (intelligenceTimer) clearInterval(intelligenceTimer);
+  if (briefingTimer) clearTimeout(briefingTimer);
   window.removeEventListener("popstate", restoreRoute);
 });
 </script>
@@ -1030,6 +1105,8 @@ onBeforeUnmount(() => {
             {{
               page === "home"
                 ? "Market Intelligence"
+                : page === "briefing"
+                  ? "Trader Decision Desk"
                 : page === "market"
                   ? "Market Scanner"
                   : page === "detail"
@@ -1176,7 +1253,7 @@ onBeforeUnmount(() => {
           </section>
           <section class="terminal-panel">
             <header>
-              <h2>AI Opportunities</h2>
+              <h2>Research Watch · 非买入推荐</h2>
               <InfoTip term="AI Score" />
             </header>
             <div class="signal-list">
@@ -1888,6 +1965,53 @@ onBeforeUnmount(() => {
           </div>
         </template>
         <div v-else class="empty-state large">选择市场和周期后运行 Deep Research。研究完成前不会展示预填概率或虚构排行榜。</div>
+      </section>
+
+      <section v-else-if="page === 'briefing'" class="workspace briefing-workspace">
+        <div class="briefing-trust strip">
+          <div><span>研究状态</span><strong class="warning">{{ traderBriefing?.research_status || "NO EDGE" }}</strong></div>
+          <div><span>生产模型</span><strong>{{ traderBriefing?.production_model || "NONE" }}</strong></div>
+          <div><span>覆盖</span><strong>{{ traderBriefing?.coverage?.completed || 0 }} / {{ traderBriefing?.coverage?.requested || 0 }}</strong></div>
+          <div><span>未处理风险提醒</span><strong :class="traderBriefing?.alerts?.length ? 'negative' : 'positive'">{{ traderBriefing?.alerts?.length || 0 }}</strong></div>
+          <small>这里优先关闭错误行动，不输出自动买卖指令。</small>
+        </div>
+        <div class="briefing-actions">
+          <div><span>DAILY WATCHLIST BRIEF</span><h2>自选风险与证据变化</h2><p>{{ traderBriefing?.notice }}</p></div>
+          <button @click="exportBriefing" :disabled="!traderBriefing?.items?.length">导出可审计报告</button>
+          <button class="primary" @click="loadTraderBriefing(true)" :disabled="traderBriefing?.refresh?.status === 'RUNNING'">
+            {{ traderBriefing?.refresh?.status === "RUNNING" ? "后台评估中…" : "刷新全部自选" }}
+          </button>
+        </div>
+        <div v-if="briefingError" class="state-error"><span>{{ briefingError }}</span><button @click="loadTraderBriefing(true)">重试</button></div>
+        <div v-if="traderBriefing?.alerts?.length" class="briefing-alerts terminal-panel">
+          <header><h2>需要先处理的变化</h2><small>提醒不触发真实交易</small></header>
+          <article v-for="alert in traderBriefing.alerts" :key="alert.id">
+            <b :class="alert.severity === 'CRITICAL' ? 'negative' : 'warning'">{{ alert.title }}</b>
+            <span>{{ alert.detail }}</span><time>{{ timeLabel(alert.created_at) }}</time>
+            <button @click="acknowledgeBriefingAlert(alert.id)">已复核</button>
+          </article>
+        </div>
+        <div v-if="briefingLoading && !traderBriefing" class="page-skeleton"><i v-for="n in 6" :key="n"></i></div>
+        <div v-else-if="!traderBriefing?.items?.length" class="empty-state large">
+          首次简报正在后台生成。页面保持可操作，完成后会自动显示；外部数据源失败不会伪造结果。
+        </div>
+        <div v-else class="briefing-grid">
+          <article v-for="x in traderBriefing.items" :key="x.asset_type + x.symbol" class="terminal-panel briefing-card">
+            <header>
+              <div><span>{{ x.decision_gate }}</span><h2>{{ x.name }} <small>{{ x.symbol }}</small></h2></div>
+              <b :class="x.decision_gate === 'RISK_REVIEW' ? 'negative' : x.decision_gate === 'WATCH_ONLY' ? 'warning' : 'neutral'">{{ x.next_action }}</b>
+            </header>
+            <div class="briefing-score">
+              <div><span>研究结论</span><strong>{{ x.action }}</strong><small>综合分 {{ number(x.score) }}</small></div>
+              <div><span>证据等级</span><strong :class="x.evidence_grade === 'D' ? 'warning' : ''">{{ x.evidence_grade }}</strong><small>{{ x.resolved_samples }} 个已结算样本</small></div>
+              <div><span>现价</span><strong>{{ money(x.current_price, x.currency) }}</strong><small>截止 {{ timeLabel(x.data_cutoff) }}</small></div>
+              <div><span>止损 / 离场线</span><strong class="negative">{{ money(x.risk_plan.exit_line, x.currency) }}</strong><small>{{ x.is_stale ? "数据过期，决策门已关" : "仅在对应方向成立时使用" }}</small></div>
+            </div>
+            <p>{{ x.summary }}</p>
+            <ul><li v-for="reason in x.blockers" :key="reason">{{ reason }}</li></ul>
+            <footer><span>{{ x.data_source }}</span><button @click="loadWatchReport(assetFrom(x)); nav('news')">查看新闻与完整证据 →</button></footer>
+          </article>
+        </div>
       </section>
 
       <section

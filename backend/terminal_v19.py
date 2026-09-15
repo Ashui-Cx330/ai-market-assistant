@@ -17,7 +17,9 @@ from .cache import cache
 from .database import (connection, list_watchlist, load_news_intelligence,
                        load_provider_health, query_news_intelligence,
                        save_news_intelligence, save_provider_health, prediction_statistics,
-                       provider_health_snapshot)
+                       provider_health_snapshot, save_trader_briefing,
+                       latest_trader_briefing, save_trader_alert,
+                       list_trader_alerts, acknowledge_trader_alert)
 from .indicators import calculate_indicators, indicator_payload
 from .market import canonical_symbol, crypto_kline, crypto_quote, stock_kline, stock_quote
 from .news_intelligence import build_intelligence, collect_news
@@ -26,6 +28,7 @@ from .strategy_engine import StrategyEngine
 router = APIRouter(prefix="/api/terminal", tags=["Product Terminal v1.9"])
 _ANALYSIS_CPU_SEMAPHORE = asyncio.Semaphore(2)
 _BACKGROUND_TASKS: set[asyncio.Task] = set()
+_BRIEFING_REFRESH = {"status":"IDLE", "started_at":None, "completed_at":None, "error":None}
 
 
 def _background(coro, name: str) -> None:
@@ -72,6 +75,10 @@ class AssetWorkspaceRequest(BaseModel):
 
 class CopilotRequest(BaseModel):
     message: str = Field(min_length=1, max_length=500)
+
+
+class AlertAcknowledgeRequest(BaseModel):
+    alert_id: int = Field(gt=0)
 
 
 class StrategyParseRequest(BaseModel):
@@ -483,7 +490,8 @@ async def watchlist_report(symbol: str, asset_type: str, name: str | None = None
              f"V5 技术共识 {technical_score:+.2f}，综合评估 {combined:+.2f}，当前结论：{action}。")
     signals=sorted([x for x in strategy["signals"] if x["status"]=="AVAILABLE"],
                    key=lambda x:float(x.get("confidence") or 0),reverse=True)[:8]
-    report={"symbol":canonical,"name":meta["name"],"asset_type":asset_type,"currency":quote.get("currency"),"verdict":direction,"action":action,
+    report={"symbol":canonical,"name":meta["name"],"asset_type":asset_type,"currency":quote.get("currency"),
+            "current_price":float(quote["price"]),"verdict":direction,"action":action,
             "score":combined,"summary":summary,"news":{"items":feed["items"][:20],"count":len(feed["items"]),
             "positive":positive,"negative":negative,"weighted_score":news_score,"window_hours":168 if feed["items"] else 720},
             "components":{"v5_technical":technical_score,"terminal_factors":terminal_score,"news":news_score,"weights":weights},
@@ -496,6 +504,142 @@ async def watchlist_report(symbol: str, asset_type: str, name: str | None = None
             "notice":"这是基于可观测数据的研究评估，不是收益保证；新闻规则情绪尚不是校准概率。"}
     cache.set(key,report,300)
     return {"success":True,"data":{**report,"cache_status":"MISS"},"source":source}
+
+
+def _parse_utc(value: str | None) -> datetime | None:
+    try:
+        stamp=datetime.fromisoformat(str(value).replace("Z","+00:00"))
+        return stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp.astimezone(timezone.utc)
+    except (TypeError,ValueError):
+        return None
+
+
+def _briefing_item(report: dict, sample_count: int) -> tuple[dict,list[dict]]:
+    now=datetime.now(timezone.utc);cutoff=_parse_utc(report.get("data_cutoff"))
+    age_hours=round((now-cutoff).total_seconds()/3600,1) if cutoff else None
+    stale_limit=8 if report["asset_type"]=="crypto" else 96
+    stale=age_hours is None or age_hours>stale_limit
+    price=float(report.get("current_price") or report["risk_plan"]["entry"])
+    exit_line=float(report["risk_plan"]["exit_line"])
+    bullish=report["verdict"]=="偏多";bearish=report["verdict"]=="偏空"
+    breached=(bullish and price<=exit_line) or (bearish and price>=exit_line)
+    headlines=report.get("news",{}).get("items",[])[:3]
+    important=[x for x in headlines if float(x.get("impact",{}).get("score") or 0)>=80]
+    evidence_grade="C" if sample_count>=100 and not stale else "D"
+    blockers=["生产模型状态为 NO EDGE，方向仅供研究观察"]
+    if sample_count<100: blockers.append(f"本机已结算样本仅 {sample_count}，不足以证明优势")
+    if stale: blockers.append("行情数据已过新鲜度阈值，禁止据此行动")
+    if report.get("news",{}).get("count",0)==0: blockers.append("近期没有明确关联新闻")
+    if breached: gate="RISK_REVIEW";next_action="价格已越过失效线：先复核或退出模拟仓位"
+    elif stale: gate="NO_ACTION";next_action="等待行情恢复后再评估"
+    elif important: gate="RISK_REVIEW";next_action="存在高影响快讯：核对原文与价格确认"
+    elif bullish or bearish: gate="WATCH_ONLY";next_action="等待价格、结构与成交量确认，不追单"
+    else: gate="NO_ACTION";next_action="没有一致证据，保持观察"
+    priority=100 if breached else 80 if important else 70 if stale else 45 if bullish or bearish else 20
+    item={"symbol":report["symbol"],"name":report["name"],"asset_type":report["asset_type"],
+          "currency":report.get("currency"),"current_price":price,"verdict":report["verdict"],
+          "action":report["action"],"score":report["score"],"decision_gate":gate,
+          "next_action":next_action,"priority":priority,"data_cutoff":report.get("data_cutoff"),
+          "age_hours":age_hours,"is_stale":stale,"evidence_grade":evidence_grade,
+          "resolved_samples":sample_count,"risk_plan":report["risk_plan"],
+          "components":report["components"],"summary":report["summary"],"headlines":headlines,
+          "blockers":blockers,"data_source":report.get("data_source")}
+    alerts=[];created=now.isoformat();suffix=str(report.get("data_cutoff") or "unknown")
+    if breached:
+        alerts.append({"fingerprint":f"exit:{report['asset_type']}:{report['symbol']}:{suffix}",
+            "symbol":report["symbol"],"asset_type":report["asset_type"],"alert_type":"EXIT_LINE_BREACH",
+            "severity":"CRITICAL","title":f"{report['symbol']} 已越过失效线",
+            "detail":f"现价 {price:g}，失效线 {exit_line:g}。请先复核，不自动下单。",
+            "data_cutoff":report.get("data_cutoff"),"created_at":created})
+    if stale:
+        alerts.append({"fingerprint":f"stale:{report['asset_type']}:{report['symbol']}:{suffix}",
+            "symbol":report["symbol"],"asset_type":report["asset_type"],"alert_type":"STALE_DATA",
+            "severity":"WARNING","title":f"{report['symbol']} 数据过期",
+            "detail":f"数据距今 {age_hours if age_hours is not None else '未知'} 小时，决策门已关闭。",
+            "data_cutoff":report.get("data_cutoff"),"created_at":created})
+    for news in important:
+        news_id=str(news.get("id") or hashlib.sha256(str(news.get("title")).encode()).hexdigest()[:16])
+        alerts.append({"fingerprint":f"news:{report['symbol']}:{news_id}","symbol":report["symbol"],
+            "asset_type":report["asset_type"],"alert_type":"HIGH_IMPACT_NEWS","severity":"WARNING",
+            "title":f"{report['symbol']} 出现高影响快讯","detail":str(news.get("title") or "请核对新闻原文"),
+            "data_cutoff":report.get("data_cutoff"),"created_at":created})
+    return item,alerts
+
+
+async def _refresh_trader_briefing() -> None:
+    _BRIEFING_REFRESH.update(status="RUNNING",started_at=datetime.now(timezone.utc).isoformat(),error=None)
+    previous=await asyncio.to_thread(latest_trader_briefing)
+    prior={(x["asset_type"],x["symbol"]):x for x in (previous or {}).get("items",[])}
+    assets=list_watchlist();slots=asyncio.Semaphore(2);items=[];errors=[];alerts=[]
+    with connection() as conn:
+        sample_rows=conn.execute("""SELECT symbol,asset_type,COUNT(*) samples FROM prediction_history
+            WHERE status='RESOLVED' GROUP BY symbol,asset_type""").fetchall()
+    samples={(x["symbol"],x["asset_type"]):int(x["samples"]) for x in sample_rows}
+    async def one(asset: dict) -> None:
+        async with slots:
+            try:
+                response=await asyncio.wait_for(watchlist_report(asset["symbol"],asset["asset_type"],asset.get("name")),timeout=38)
+                item,new_alerts=_briefing_item(response["data"],samples.get((asset["symbol"],asset["asset_type"]),0))
+                old=prior.get((item["asset_type"],item["symbol"]))
+                if old and (old.get("decision_gate"),old.get("verdict")) != (item["decision_gate"],item["verdict"]):
+                    new_alerts.append({"fingerprint":f"state:{item['asset_type']}:{item['symbol']}:{item['data_cutoff']}:{item['decision_gate']}:{item['verdict']}",
+                        "symbol":item["symbol"],"asset_type":item["asset_type"],"alert_type":"STATE_CHANGE",
+                        "severity":"INFO","title":f"{item['symbol']} 研究状态发生变化",
+                        "detail":f"{old.get('verdict')} / {old.get('decision_gate')} → {item['verdict']} / {item['decision_gate']}",
+                        "data_cutoff":item["data_cutoff"],"created_at":datetime.now(timezone.utc).isoformat()})
+                items.append(item);alerts.extend(new_alerts)
+            except Exception as exc:
+                errors.append({"symbol":asset["symbol"],"asset_type":asset["asset_type"],"error":str(exc)})
+    await asyncio.gather(*(one(asset) for asset in assets))
+    items.sort(key=lambda x:(-x["priority"],x["symbol"]))
+    generated=datetime.now(timezone.utc).isoformat()
+    payload={"snapshot_id":str(hashlib.sha256(generated.encode()).hexdigest()[:24]),"generated_at":generated,
+        "data_cutoff":max((x.get("data_cutoff") or "" for x in items),default=None),"items":items,"errors":errors,
+        "coverage":{"requested":len(assets),"completed":len(items),"failed":len(errors)},
+        "research_status":"NO EDGE","production_model":"NONE","decision_policy":"RISK_FIRST_NO_AUTO_TRADING",
+        "notice":"决策台用于压缩研究与风险复核时间，不是买卖指令或收益承诺。"}
+    await asyncio.to_thread(save_trader_briefing,payload)
+    for alert in alerts: await asyncio.to_thread(save_trader_alert,alert)
+    cache.set("trader-briefing-v1",payload,300)
+    _BRIEFING_REFRESH.update(status="COMPLETED",completed_at=generated,error=None)
+
+
+def _start_briefing_refresh() -> None:
+    if _BRIEFING_REFRESH["status"]!="RUNNING":
+        async def guarded() -> None:
+            try:
+                await _refresh_trader_briefing()
+            except Exception as exc:
+                _BRIEFING_REFRESH.update(status="FAILED",completed_at=datetime.now(timezone.utc).isoformat(),error=str(exc))
+        _background(guarded(),"refresh:trader-briefing")
+
+
+@router.get("/trader-briefing")
+async def trader_briefing(refresh: bool = False) -> dict:
+    payload=cache.get("trader-briefing-v1") or await asyncio.to_thread(latest_trader_briefing)
+    generated=_parse_utc((payload or {}).get("generated_at"))
+    expired=not generated or (datetime.now(timezone.utc)-generated)>timedelta(minutes=15)
+    if refresh or expired: _start_briefing_refresh()
+    if not payload:
+        payload={"snapshot_id":None,"generated_at":None,"data_cutoff":None,"items":[],"errors":[],
+            "coverage":{"requested":len(list_watchlist()),"completed":0,"failed":0},"research_status":"NO EDGE",
+            "production_model":"NONE","decision_policy":"RISK_FIRST_NO_AUTO_TRADING",
+            "notice":"首次决策简报正在后台生成；页面不会等待外部数据源。"}
+    return {"success":True,"data":{**payload,"refresh":dict(_BRIEFING_REFRESH),
+        "alerts":await asyncio.to_thread(list_trader_alerts,True,100)},"source":"persistent local decision-desk snapshots"}
+
+
+@router.post("/trader-briefing/refresh")
+async def refresh_trader_briefing() -> dict:
+    _start_briefing_refresh()
+    return {"success":True,"data":{"status":_BRIEFING_REFRESH["status"]}}
+
+
+@router.post("/trader-alerts/acknowledge")
+async def acknowledge_alert(body: AlertAcknowledgeRequest) -> dict:
+    if not await asyncio.to_thread(acknowledge_trader_alert,body.alert_id):
+        raise HTTPException(404,"提醒不存在")
+    return {"success":True,"data":{"alert_id":body.alert_id,"status":"ACKNOWLEDGED"}}
 
 
 @router.get("/model-lab")

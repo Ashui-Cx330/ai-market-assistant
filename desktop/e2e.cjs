@@ -25,6 +25,11 @@ async function run() {
     await page.getByRole('heading', { name: 'Market Intelligence', exact: true }).waitFor({ timeout: 90000 })
     await page.locator('.pulse-score strong').waitFor({ timeout: 90000 })
 
+    await nav(page, '交易决策台', 'Trader Decision Desk')
+    await page.locator('.briefing-trust').waitFor({ timeout: 10000 })
+    await page.getByText('NO EDGE', { exact: true }).first().waitFor()
+    await page.getByText(/页面保持可操作|自选风险与证据变化/).first().waitFor()
+
     await nav(page, '行情', 'Market Scanner')
     const scannerRow = page.locator('.scanner-table tbody tr').first()
     await scannerRow.waitFor({ timeout: 90000 })
@@ -88,7 +93,7 @@ async function run() {
     await nav(page, '首页', 'Market Intelligence')
     await page.locator('.pulse-score strong').waitFor({ timeout: 90000 })
     await page.screenshot({ path: path.join(root, 'work', 'v19-home.png'), fullPage: true })
-    console.log(`PASS ${packaged ? 'packaged' : 'development'} v1.9 routes/scanner/chart/tooltip/model-lab/strategy/paper-confirm/copilot/news/data-health`)
+    console.log(`PASS ${packaged ? 'packaged' : 'development'} v1.15 decision-desk/routes/scanner/chart/model-lab/strategy/paper/copilot/news/data-health`)
     complete = true
   } finally {
     await app.close()

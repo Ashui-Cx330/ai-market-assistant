@@ -20,11 +20,11 @@ else:
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 _IMPORT_DB_PATH = DB_PATH
 _INIT_LOCK = RLock()
-SCHEMA_VERSION = "1.14.0"
+SCHEMA_VERSION = "1.15.0"
 
 
 def _backup_before_migration(path: Path) -> Path | None:
-    """Create one recoverable database backup before the v1.14 additive migration."""
+    """Create one recoverable database backup before the current additive migration."""
     if not path.exists() or path.stat().st_size == 0:
         return None
     try:
@@ -254,7 +254,21 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, status TEXT NOT NULL,
                 last_successful_fetch TEXT, last_check TEXT NOT NULL, last_data_timestamp TEXT,
                 latency_ms INTEGER, error_rate REAL, error TEXT, payload_json TEXT NOT NULL
-            );"""
+            );
+            CREATE TABLE IF NOT EXISTS trader_briefing_snapshots (
+                snapshot_id TEXT PRIMARY KEY, generated_at TEXT NOT NULL,
+                data_cutoff TEXT, payload_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_trader_briefing_generated
+                ON trader_briefing_snapshots(generated_at DESC);
+            CREATE TABLE IF NOT EXISTS trader_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT NOT NULL UNIQUE,
+                symbol TEXT NOT NULL, asset_type TEXT NOT NULL, alert_type TEXT NOT NULL,
+                severity TEXT NOT NULL, title TEXT NOT NULL, detail TEXT NOT NULL,
+                data_cutoff TEXT, created_at TEXT NOT NULL, acknowledged_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_trader_alerts_open
+                ON trader_alerts(acknowledged_at,created_at DESC);"""
         )
         prediction_columns={row[1] for row in conn.execute("PRAGMA table_info(prediction_history)")}
         migrations={"prediction_id":"TEXT","model_version":"TEXT","feature_version":"TEXT","risk_reward":"REAL",
@@ -653,6 +667,59 @@ def quant_prediction_snapshots(symbol: str | None=None, limit: int=100) -> list[
         else:
             rows=conn.execute("SELECT * FROM quant_prediction_snapshots ORDER BY generated_at DESC LIMIT ?",(limit,)).fetchall()
     return [dict(row) for row in rows]
+
+
+def save_trader_briefing(payload: dict) -> str:
+    """Persist the decision-desk snapshot separately from disposable HTTP cache."""
+    snapshot_id = str(payload.get("snapshot_id") or uuid.uuid4())
+    with connection() as conn:
+        conn.execute(
+            """INSERT INTO trader_briefing_snapshots
+               (snapshot_id,generated_at,data_cutoff,payload_json) VALUES(?,?,?,?)""",
+            (snapshot_id, payload["generated_at"], payload.get("data_cutoff"),
+             json.dumps({**payload, "snapshot_id": snapshot_id}, ensure_ascii=False, default=str)),
+        )
+        # This is a compact operational history, not an immutable research ledger.
+        conn.execute("""DELETE FROM trader_briefing_snapshots WHERE snapshot_id NOT IN
+            (SELECT snapshot_id FROM trader_briefing_snapshots ORDER BY generated_at DESC LIMIT 90)""")
+    return snapshot_id
+
+
+def latest_trader_briefing() -> dict | None:
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM trader_briefing_snapshots ORDER BY generated_at DESC LIMIT 1"
+        ).fetchone()
+    return json.loads(row["payload_json"]) if row else None
+
+
+def save_trader_alert(alert: dict) -> bool:
+    with connection() as conn:
+        cursor = conn.execute(
+            """INSERT OR IGNORE INTO trader_alerts
+               (fingerprint,symbol,asset_type,alert_type,severity,title,detail,data_cutoff,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (alert["fingerprint"], alert["symbol"], alert["asset_type"], alert["alert_type"],
+             alert["severity"], alert["title"], alert["detail"], alert.get("data_cutoff"),
+             alert["created_at"]),
+        )
+        return cursor.rowcount > 0
+
+
+def list_trader_alerts(open_only: bool = True, limit: int = 100) -> list[dict]:
+    where = "WHERE acknowledged_at IS NULL" if open_only else ""
+    with connection() as conn:
+        return [dict(row) for row in conn.execute(
+            f"SELECT * FROM trader_alerts {where} ORDER BY created_at DESC LIMIT ?", (limit,)
+        )]
+
+
+def acknowledge_trader_alert(alert_id: int) -> bool:
+    with connection() as conn:
+        cursor = conn.execute(
+            "UPDATE trader_alerts SET acknowledged_at=CURRENT_TIMESTAMP WHERE id=?", (alert_id,)
+        )
+        return cursor.rowcount > 0
 
 
 def save_quant_research_run(result: dict) -> str:

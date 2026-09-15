@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from backend.terminal_v19 import (_market_pair, _scanner_indicator_summary, _score,
-                                  _watchlist_news_payload, _weighted_news_score,
+                                  _briefing_item, _watchlist_news_payload, _weighted_news_score,
                                   parse_strategy_text)
 
 
@@ -75,3 +75,17 @@ def test_recent_high_impact_news_receives_more_weight():
     items=[{"published_at":now.isoformat(),"sentiment":{"score":60},"impact":{"score":90}},
            {"published_at":(now-timedelta(days=20)).isoformat(),"sentiment":{"score":-60},"impact":{"score":20}}]
     assert _weighted_news_score(items)>40
+
+
+def test_trader_briefing_closes_gate_for_stale_or_breached_data():
+    report={"symbol":"BTC","name":"Bitcoin","asset_type":"crypto","currency":"USDT",
+            "current_price":90,"verdict":"偏多","action":"做多观察","score":25,
+            "data_cutoff":(datetime.now(timezone.utc)-timedelta(hours=10)).isoformat(),
+            "data_source":"observed test source","summary":"test","components":{},
+            "risk_plan":{"entry":100,"exit_line":95,"take_profits":[]},
+            "news":{"count":0,"items":[]}}
+    item,alerts=_briefing_item(report,12)
+    assert item["decision_gate"]=="RISK_REVIEW"
+    assert item["evidence_grade"]=="D"
+    assert {x["alert_type"] for x in alerts}=={"EXIT_LINE_BREACH","STALE_DATA"}
+    assert any("NO EDGE" in blocker for blocker in item["blockers"])

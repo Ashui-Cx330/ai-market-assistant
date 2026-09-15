@@ -1,6 +1,17 @@
 # AI行情助手自动更新与发布
 
-当前正式版本：**v1.14.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。GitHub Release 同时发布 Windows 安装包、`.blockmap` 和 `latest.yml`，旧版客户端可据此检查、下载并安装更新。
+当前正式版本：**v1.15.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。GitHub Release 同时发布 Windows 安装包、`.blockmap` 和 `latest.yml`，旧版客户端可据此检查、下载并安装更新。
+
+## v1.15.0 / Trader Decision Desk
+
+- 新增“交易决策台”：对自选股/币生成按风险优先级排序的研究简报。
+- 简报持久化到用户数据库，页面先展示最近快照，再在后台并发刷新，避免每次导航等待外部数据源。
+- 新增决策门 `RISK_REVIEW / WATCH_ONLY / NO_ACTION`；数据过期时自动禁止行动提示。
+- 新增失效线越界、高影响新闻、数据过期和研究状态变化提醒，支持复核确认与去重。
+- 展示证据等级、已结算样本数、明确限制、现价、止损/离场线与来源截止时间。
+- 支持从桌面客户端导出 Markdown 可审计研究报告。
+- 首页原“AI Opportunities”改为“Research Watch · 非买入推荐”，避免在 `NO EDGE` 状态下误导。
+- 用户数据表为加法迁移，更新前自动备份，程序安装目录与用户数据目录继续分离。
 
 ## v1.14.0 / Alpha Discovery & Data Expansion
 
