@@ -24,6 +24,9 @@ type Page =
   | "home"
   | "briefing"
   | "market"
+  | "cnMarket"
+  | "usMarket"
+  | "cryptoMarket"
   | "detail"
   | "watchlist"
   | "screener"
@@ -37,7 +40,7 @@ type Page =
   | "copilot"
   | "settings";
 const page = ref<Page>("home"),
-  appVersion = ref("1.15.1"),
+  appVersion = ref("1.16.0"),
   pageLoading = ref(false),
   pageError = ref("");
 const dashboard = ref<any>(null),
@@ -73,6 +76,7 @@ const query = ref(""),
   searchResults = ref<Asset[]>([]),
   searchError = ref("");
 const searchIndex = ref(0);
+const marketScannerSnapshots = ref<Record<string, any>>({});
 const selected = ref<Asset | null>(null),
   quote = ref<Quote | null>(null),
   candles = ref<Candle[]>([]),
@@ -243,6 +247,31 @@ function assetFrom(row: any): Asset {
   };
 }
 
+const marketPageMap: Record<string, string> = {
+  cnMarket: "A股",
+  usMarket: "美股",
+  cryptoMarket: "Crypto",
+};
+const chineseTerms: Record<string, string> = {
+  trend: "趋势", technical: "技术指标", news: "新闻情绪", momentum: "动量", risk: "风险",
+  positive: "正向", negative: "负向", UP: "上涨", DOWN: "下跌", SIDEWAYS: "震荡",
+  AVAILABLE: "可用", "INSUFFICIENT DATA": "数据不足", HIGH: "高", MEDIUM: "中", LOW: "低",
+  PASSED: "通过", RUNNING: "运行中", QUEUED: "排队中", COMPLETED: "已完成",
+  BUY: "买入观察", SELL: "卖出观察", HOLD: "持有观察", WATCH: "继续观察",
+  MARKET: "市价", LIMIT: "限价", filled: "已成交", pending: "待成交", cancelled: "已取消",
+  NONE: "无生产模型", NO_EDGE: "暂无统计优势", "NO EDGE": "暂无统计优势", Trading: "交易中", Closed: "休市",
+  "Pre-market": "盘前", CONNECTED: "已连接", DISCONNECTED: "未连接",
+  RISK_REVIEW: "优先复核风险", WATCH_ONLY: "仅观察", NO_ACTION: "暂不行动",
+  EXPERIMENTAL: "实验阶段", STALE: "数据陈旧", DEGRADED: "服务降级",
+};
+function zh(value: unknown) {
+  const text = String(value ?? "—");
+  return chineseTerms[text] || chineseTerms[text.toUpperCase()] || text;
+}
+function marketHeading() {
+  return page.value === "cnMarket" ? "A股行情" : page.value === "usMarket" ? "美股行情" : page.value === "cryptoMarket" ? "热门币种行情" : "跨市场行情";
+}
+
 async function loadHome(force = false) {
   pageLoading.value = true;
   pageError.value = "";
@@ -261,17 +290,21 @@ async function loadHome(force = false) {
     pageLoading.value = false;
   }
 }
-async function runScanner() {
+async function runScanner(marketOverride?: string) {
   const requestId = ++scannerRequestId;
+  const fixedMarket = marketOverride || marketPageMap[page.value];
+  const snapshotKey = fixedMarket || "全部";
+  scanner.value = marketScannerSnapshots.value[snapshotKey] || { rows: [], errors: [], available: 0 };
   scannerLoading.value = true;
   pageError.value = "";
   try {
     const result = await post<any>(
       "/api/terminal/scanner",
-      scannerFilters.value,
+      { ...scannerFilters.value, market: fixedMarket || scannerFilters.value.market },
     );
     if (requestId !== scannerRequestId) return;
     scanner.value = result;
+    marketScannerSnapshots.value[snapshotKey] = result;
     if (!result.rows.length && result.errors.length)
       pageError.value = "部分公开数据源不可用，当前没有可展示结果。";
   } catch (e) {
@@ -672,15 +705,15 @@ function briefingMarkdown() {
     `# AI行情助手 自选研究简报`,
     ``,
     `生成时间：${briefing?.generated_at || "生成中"}`,
-    `研究状态：${briefing?.research_status || "NO EDGE"}`,
-    `生产模型：${briefing?.production_model || "NONE"}`,
+    `研究状态：${zh(briefing?.research_status || "NO_EDGE")}`,
+    `生产模型：${zh(briefing?.production_model || "NONE")}`,
     ``,
     `> ${briefing?.notice || "仅供研究复核，不构成投资建议。"}`,
     ``,
   ];
   for (const x of briefing?.items || []) {
     lines.push(`## ${x.name}（${x.symbol}）`);
-    lines.push(`- 决策门：${x.decision_gate}；研究结论：${x.action}；证据等级：${x.evidence_grade}`);
+    lines.push(`- 决策门：${zh(x.decision_gate)}；研究结论：${x.action}；证据等级：${x.evidence_grade}`);
     lines.push(`- 现价：${x.current_price}；止损/离场线：${x.risk_plan?.exit_line}`);
     lines.push(`- 下一步：${x.next_action}`);
     lines.push(`- 数据截止：${x.data_cutoff}；来源：${x.data_source}`);
@@ -965,6 +998,9 @@ const paths: Record<Page, string> = {
   home: "/",
   briefing: "/briefing",
   market: "/market",
+  cnMarket: "/markets/cn",
+  usMarket: "/markets/us",
+  cryptoMarket: "/markets/crypto",
   detail: "/",
   watchlist: "/watchlist",
   screener: "/screener",
@@ -994,16 +1030,19 @@ async function nav(target: string, route = true) {
       },
     }),
   );
-  if (target === "home") await loadHome();
-  if (target === "briefing") await loadTraderBriefing();
-  if (target === "market" || target === "screener") await runScanner();
-  if (target === "watchlist") await loadWatchlist();
-  if (target === "modelLab") await loadModelLab();
-  if (target === "quantResearch") await loadQuantDashboard();
-  if (target === "news") await loadNews();
-  if (target === "settings") await loadDataHealth();
+  // Navigation must render immediately. Every data loader owns its own
+  // loading/error state and updates the newly visible page asynchronously.
+  if (target === "home") void loadHome();
+  if (target === "briefing") void loadTraderBriefing();
+  if (target === "market" || target === "screener") void runScanner();
+  if (target in marketPageMap) void runScanner(marketPageMap[target]);
+  if (target === "watchlist") void loadWatchlist();
+  if (target === "modelLab") void loadModelLab();
+  if (target === "quantResearch") void loadQuantDashboard();
+  if (target === "news") void loadNews();
+  if (target === "settings") void loadDataHealth();
   if (target === "paper") {
-    await loadPaper();
+    void loadPaper();
     if (paperTimer) clearInterval(paperTimer);
     paperTimer = window.setInterval(
       () => page.value === "paper" && void loadPaper(),
@@ -1045,7 +1084,10 @@ function restoreRoute() {
   const map: Record<string, Page> = {
     "/": "home",
     "/briefing": "briefing",
-    "/market": "market",
+    "/market": "cnMarket",
+    "/markets/cn": "cnMarket",
+    "/markets/us": "usMarket",
+    "/markets/crypto": "cryptoMarket",
     "/watchlist": "watchlist",
     "/screener": "screener",
     "/prediction": "prediction",
@@ -1065,6 +1107,7 @@ function refresh() {
   else if (page.value === "briefing") void loadTraderBriefing(true);
   else if (page.value === "market" || page.value === "screener")
     void runScanner();
+  else if (page.value in marketPageMap) void runScanner(marketPageMap[page.value]);
   else if (page.value === "news") void loadNews(undefined, true);
   else if (page.value === "paper") void loadPaper();
   else if (page.value === "settings") void loadDataHealth();
@@ -1104,38 +1147,44 @@ onBeforeUnmount(() => {
           <h1>
             {{
               page === "home"
-                ? "Market Intelligence"
+                ? "市场智能总览"
                 : page === "briefing"
-                  ? "Trader Decision Desk"
+                  ? "交易决策台"
+                : page === "cnMarket"
+                  ? "A股行情"
+                : page === "usMarket"
+                  ? "美股行情"
+                : page === "cryptoMarket"
+                  ? "热门币种行情"
                 : page === "market"
-                  ? "Market Scanner"
+                  ? "跨市场行情"
                   : page === "detail"
                     ? selected?.name || "资产详情"
                     : page === "watchlist"
-                      ? "My Watchlist"
+                      ? "我的自选"
                       : page === "screener"
-                        ? "AI Screener"
+                        ? "智能选股"
                         : page === "prediction"
-                          ? "AI Outlook"
+                          ? "AI 研究预测"
                           : page === "quantResearch"
-                            ? "Quant Research"
+                            ? "量化研究"
                             : page === "modelLab"
-                            ? "Model Lab"
+                            ? "模型表现"
                             : page === "news"
-                              ? "AI Market Intelligence"
+                              ? "新闻情报中心"
                               : page === "strategy"
-                                ? "Strategy Lab"
+                                ? "策略实验室"
                                 : page === "backtest"
-                                  ? "Backtest Research"
+                                  ? "历史回测"
                                   : page === "paper"
-                                    ? "Paper Trading Terminal"
+                                    ? "模拟交易"
                                     : page === "copilot"
-                                      ? "AI Market Copilot"
-                                      : "Settings & Data Health"
+                                      ? "AI 市场助手"
+                                      : "设置与数据健康"
             }}
           </h1>
           <span
-            >{{ liveStatus }} ·
+            >{{ zh(liveStatus) }} ·
             {{
               realtimeMarketStore.lastUpdateTime.value || "等待实时数据"
             }}</span
@@ -1146,7 +1195,7 @@ onBeforeUnmount(() => {
             v-model="query"
             @input="scheduleSearch"
             @keydown="searchKey"
-            placeholder="搜索股票、ETF、指数、Crypto"
+            placeholder="搜索股票、ETF、指数、加密货币"
           /><button @click="searchAssets">搜索</button>
           <div v-if="searchOpen" class="search-pop">
             <div v-if="searching" class="skeleton-line"></div>
@@ -1184,14 +1233,14 @@ onBeforeUnmount(() => {
         <div class="market-status strip">
           <div v-for="x in dashboard.market_status" :key="x.market">
             <i :class="statusTone(x.status)"></i><b>{{ x.market }}</b
-            ><span>{{ x.status }}</span
+            ><span>{{ zh(x.status) }}</span
             ><time>{{ x.time }}</time>
           </div>
           <small>数据截止 {{ timeLabel(dashboard.data_cutoff) }}</small>
         </div>
         <div class="pulse-layout">
           <article class="pulse-score">
-            <span>AI MARKET PULSE</span
+            <span>AI 市场温度</span
             ><strong>{{ dashboard.pulse.score }}</strong
             ><b>{{ dashboard.pulse.stance }}</b
             ><small><InfoTip term="AI Score" /></small>
@@ -1207,7 +1256,7 @@ onBeforeUnmount(() => {
             </div>
           </article>
           <article class="market-brief">
-            <span>AI MARKET BRIEF</span>
+            <span>AI 市场摘要</span>
             <p>{{ dashboard.brief }}</p>
             <small
               >生成 {{ timeLabel(dashboard.generated_at) }} · 数据
@@ -1218,17 +1267,17 @@ onBeforeUnmount(() => {
         <div class="terminal-grid two-one">
           <section class="terminal-panel">
             <header>
-              <h2>Market Movers</h2>
+              <h2>市场异动</h2>
               <small>公开行情实时/延迟状态见设置</small>
             </header>
             <table class="data-table">
               <thead>
                 <tr>
-                  <th>Symbol</th>
-                  <th>Price</th>
-                  <th>Change</th>
-                  <th>AI Score</th>
-                  <th>Trend</th>
+                  <th>代码</th>
+                  <th>价格</th>
+                  <th>涨跌幅</th>
+                  <th>智能评分</th>
+                  <th>趋势</th>
                 </tr>
               </thead>
               <tbody>
@@ -1253,7 +1302,7 @@ onBeforeUnmount(() => {
           </section>
           <section class="terminal-panel">
             <header>
-              <h2>Research Watch · 非买入推荐</h2>
+              <h2>研究观察 · 非买入推荐</h2>
               <InfoTip term="AI Score" />
             </header>
             <div class="signal-list">
@@ -1272,7 +1321,7 @@ onBeforeUnmount(() => {
         <div class="terminal-grid two-one">
           <section class="terminal-panel">
             <header>
-              <h2>Breaking News</h2>
+              <h2>最新快讯</h2>
               <button @click="nav('news')">查看全部 →</button>
             </header>
             <div v-if="!dashboard.breaking_news.length" class="empty-state">
@@ -1294,7 +1343,7 @@ onBeforeUnmount(() => {
           </section>
           <section class="terminal-panel risk-panel">
             <header>
-              <h2>Risk Watch</h2>
+              <h2>风险观察</h2>
               <InfoTip term="Risk Score" />
             </header>
             <button
@@ -1311,11 +1360,11 @@ onBeforeUnmount(() => {
       </section>
 
       <section
-        v-else-if="page === 'market' || page === 'screener'"
+        v-else-if="['market', 'cnMarket', 'usMarket', 'cryptoMarket', 'screener'].includes(page)"
         class="workspace scanner-workspace"
       >
         <div v-if="page === 'screener'" class="nl-screener">
-          <span>AI SCREENER</span
+          <span>AI 智能选股</span
           ><input
             v-model="scannerFilters.query"
             placeholder="例如：美股 AI板块 趋势向上 AI Score > 70"
@@ -1331,12 +1380,12 @@ onBeforeUnmount(() => {
           >
         </div>
         <div class="filterbar">
-          <label
+          <label v-if="!marketPageMap[page]"
             >市场<select v-model="scannerFilters.market">
               <option>全部</option>
               <option>A股</option>
               <option>美股</option>
-              <option>Crypto</option>
+              <option value="Crypto">加密货币</option>
             </select></label
           ><label
             >行业<select v-model="scannerFilters.industry">
@@ -1354,7 +1403,7 @@ onBeforeUnmount(() => {
               <option>下跌</option>
             </select></label
           ><label
-            >AI Score ≥<input
+            >智能评分 ≥<input
               v-model.number="scannerFilters.min_ai_score"
               type="number"
               min="0"
@@ -1371,7 +1420,7 @@ onBeforeUnmount(() => {
               type="number"
               min="0"
               max="100" /></label
-          ><button @click="runScanner">运行筛选</button>
+          ><button @click="runScanner()">运行筛选</button>
         </div>
         <div v-if="scannerLoading" class="page-skeleton">
           <i v-for="n in 6" :key="n"></i>
@@ -1379,7 +1428,7 @@ onBeforeUnmount(() => {
         <section v-else class="terminal-panel scanner-table">
           <header>
             <h2>
-              {{ page === "market" ? "跨市场行情" : "符合条件的真实结果" }}
+              {{ page === "screener" ? "符合条件的真实结果" : marketHeading() }}
             </h2>
             <small
               >{{ scanner.available }} 可用 ·
@@ -1392,14 +1441,14 @@ onBeforeUnmount(() => {
           <table class="data-table">
             <thead>
               <tr>
-                <th>Symbol / Name</th>
-                <th>Market</th>
-                <th>Price</th>
-                <th>Change</th>
-                <th>Volume</th>
+                <th>代码 / 名称</th>
+                <th>市场</th>
+                <th>价格</th>
+                <th>涨跌幅</th>
+                <th>成交量</th>
                 <th><InfoTip term="AI Score" /></th>
-                <th>Trend</th>
-                <th>News</th>
+                <th>趋势</th>
+                <th>新闻</th>
                 <th><InfoTip term="Risk Score" /></th>
               </tr>
             </thead>
@@ -1440,7 +1489,7 @@ onBeforeUnmount(() => {
               >{{ hoveredRow.symbol }} ·
               {{ money(hoveredRow.price, hoveredRow.currency) }}</b
             ><MiniChart :candles="hoveredRow.preview" /><span
-              >AI Score {{ hoveredRow.ai_score }} ·
+              >智能评分 {{ hoveredRow.ai_score }} ·
               {{ hoveredRow.direction }}</span
             ><small>{{ hoveredRow.news[0]?.title || "暂无已关联新闻" }}</small>
           </aside>
@@ -1455,10 +1504,10 @@ onBeforeUnmount(() => {
           <div>
             <span>{{
               selected.asset_type === "crypto"
-                ? "CRYPTO"
+                ? "加密货币"
                 : /^[A-Z]/.test(selected.symbol)
-                  ? "US EQUITY"
-                  : "A-SHARE"
+                  ? "美股"
+                  : "A股"
             }}</span>
             <h2>
               {{ selected.name }} <small>{{ selected.symbol }}</small>
@@ -1470,14 +1519,14 @@ onBeforeUnmount(() => {
               pct(quote?.change_percent)
             }}</b
             ><small
-              >{{ timeLabel(quote?.updated_at) }} · {{ liveStatus }}</small
+              >{{ timeLabel(quote?.updated_at) }} · {{ zh(liveStatus) }}</small
             >
           </div>
           <div>
             <button @click="toggleWatch">
               {{ inWatchlist ? "★ 已自选" : "☆ 加入自选" }}</button
             ><button class="primary" @click="nav('prediction')">
-              AI Outlook
+              AI 研究预测
             </button>
           </div>
         </div>
@@ -1513,7 +1562,7 @@ onBeforeUnmount(() => {
           </section>
           <aside class="terminal-panel ai-analysis">
             <header>
-              <h2>AI Analysis</h2>
+              <h2>AI 功能分析</h2>
               <InfoTip term="AI Score" />
             </header>
             <div v-if="assetAnalysis">
@@ -1533,7 +1582,7 @@ onBeforeUnmount(() => {
                   ]"
                   :key="key"
                 >
-                  <span>{{ key }}</span
+                  <span>{{ zh(key) }}</span
                   ><i
                     ><em
                       :style="{ width: assetAnalysis.components[key] + '%' }"
@@ -1581,7 +1630,7 @@ onBeforeUnmount(() => {
         <section class="terminal-panel intelligence-panel">
           <header>
             <div>
-              <span>AI MARKET INTELLIGENCE</span>
+              <span>AI 市场情报</span>
               <h2>模型概率、证据与事件时间线</h2>
             </div>
             <button
@@ -1621,15 +1670,15 @@ onBeforeUnmount(() => {
               >
                 <header>
                   <b>{{ x.horizon }}</b
-                  ><span>{{ x.trend }} · Evidence {{ x.evidence }}</span>
+                  ><span>{{ zh(x.trend) }} · 证据 {{ zh(x.evidence) }}</span>
                 </header>
                 <div>
-                  <label>UP</label
+                  <label>上涨</label
                   ><i><em :style="{ width: x.up + '%' }"></em></i
                   ><strong>{{ x.up }}%</strong>
                 </div>
                 <div>
-                  <label>SIDEWAYS</label
+                  <label>震荡</label
                   ><i
                     ><em
                       class="flat"
@@ -1638,14 +1687,14 @@ onBeforeUnmount(() => {
                   ><strong>{{ x.sideways }}%</strong>
                 </div>
                 <div>
-                  <label>DOWN</label
+                  <label>下跌</label
                   ><i><em class="down" :style="{ width: x.down + '%' }"></em></i
                   ><strong>{{ x.down }}%</strong>
                 </div>
                 <small>{{ x.model_level }} · {{ x.probability_type }}</small>
               </article>
               <article class="intel-why">
-                <h3>WHY?</h3>
+                <h3>影响因素</h3>
                 <div v-for="x in marketIntel.contributions" :key="x.factor">
                   <span>{{ x.factor }}</span
                   ><b :class="tone(x.contribution)"
@@ -1656,7 +1705,7 @@ onBeforeUnmount(() => {
                   缓存记录没有完整特征贡献；重新运行后生成。
                 </p>
                 <small
-                  >Market Regime ·
+                  >市场环境 ·
                   {{
                     marketIntel.market_regime?.primary ||
                     marketIntel.market_regime ||
@@ -1688,7 +1737,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="intelligence-timeline">
               <header>
-                <h3>MARKET INTELLIGENCE TIMELINE</h3>
+                <h3>市场情报时间线</h3>
                 <span>新闻仅作情报与重算触发；未通过消融前不混入概率</span>
               </header>
               <button
@@ -1700,11 +1749,11 @@ onBeforeUnmount(() => {
                 ><b>{{ x.event?.event_type || x.category }}</b
                 ><span>{{ x.title }}</span
                 ><em
-                  >Impact {{ x.impact?.score }} · {{ x.sentiment?.label }}</em
+                  >影响分 {{ x.impact?.score }} · {{ x.sentiment?.label }}</em
                 >
               </button>
               <p v-if="!marketIntel.news_context?.items?.length">
-                News unavailable / 当前没有可明确关联的新闻，不会生成虚假新闻。
+                当前没有可明确关联的新闻，不会生成虚假新闻。
               </p>
             </div>
             <div class="intel-boundary">
@@ -1724,7 +1773,7 @@ onBeforeUnmount(() => {
           <h2>自选资产</h2>
           <label
             >排序<select v-model="watchSort">
-              <option value="score">AI Score</option>
+              <option value="score">智能评分</option>
               <option value="change">涨跌幅</option>
               <option value="risk">风险</option>
             </select></label
@@ -1737,14 +1786,14 @@ onBeforeUnmount(() => {
           <table class="data-table">
             <thead>
               <tr>
-                <th>Symbol</th>
-                <th>Price</th>
-                <th>Change</th>
-                <th>AI Score</th>
-                <th>Score Δ</th>
-                <th>Trend</th>
-                <th>News</th>
-                <th>Risk</th>
+                <th>代码</th>
+                <th>价格</th>
+                <th>涨跌幅</th>
+                <th>智能评分</th>
+                <th>评分变化</th>
+                <th>趋势</th>
+                <th>新闻</th>
+                <th>风险</th>
               </tr>
             </thead>
             <tbody>
@@ -1784,9 +1833,9 @@ onBeforeUnmount(() => {
       >
         <div class="action-header">
           <div>
-            <span>AI OUTLOOK · {{ selected?.symbol }}</span>
-            <h2>Legacy Experimental Benchmark</h2>
-            <p>Production Model = NONE。下列概率只作为旧模型研究基线；样本不足时不生成。</p>
+            <span>AI 研究预测 · {{ selected?.symbol }}</span>
+            <h2>历史实验模型基准</h2>
+            <p>生产模型：无。下列概率只作为历史模型研究基线；样本不足时不生成。</p>
           </div>
           <button class="primary" @click="runAI" :disabled="aiLoading">
             {{ aiLoading ? "训练与验证中…" : "运行真实预测" }}
@@ -1799,7 +1848,7 @@ onBeforeUnmount(() => {
         <div v-if="aiLoading && aiQuick" class="method-banner">
           <b>即时结构信号</b
           ><span
-            >{{ aiQuick.direction }} · AI Score {{ aiQuick.ai_score }}/100 ·
+            >{{ aiQuick.direction }} · 智能评分 {{ aiQuick.ai_score }}/100 ·
             风险 {{ aiQuick.components?.risk }}</span
           ><small
             >先显示当前真实量价与指标评分；概率模型仍在后台训练/验证，此评分不是上涨概率。</small
@@ -1819,7 +1868,7 @@ onBeforeUnmount(() => {
               >数据截止 <b>{{ timeLabel(aiResult.data_time) }}</b></span
             ><span
               >训练状态 <b>{{ aiResult.model.training_status }}</b></span
-            ><span>验证 <b>Purged + Walk-forward</b></span>
+            ><span>验证 <b>防泄漏时间序列滚动验证</b></span>
           </div>
           <div class="outlook-grid">
             <article
@@ -1830,7 +1879,7 @@ onBeforeUnmount(() => {
               <header>
                 <h2>{{ x.horizon }}</h2>
                 <span :class="statusTone(x.prediction ? 'AVAILABLE' : '')">{{
-                  x.prediction ? "● Available" : "● Insufficient Data"
+                  x.prediction ? "● 可用" : "● 数据不足"
                 }}</span>
               </header>
               <template v-if="x.prediction"
@@ -1839,21 +1888,21 @@ onBeforeUnmount(() => {
                 }}</strong>
                 <div class="prob-bars">
                   <label
-                    >UP
+                    >上涨
                     <i
                       ><em
                         :style="{ width: probability(x.probabilities.up) }"
                       ></em></i
                     ><b>{{ probability(x.probabilities.up) }}</b></label
                   ><label
-                    >SIDEWAYS
+                    >震荡
                     <i
                       ><em
                         :style="{ width: probability(x.probabilities.flat) }"
                       ></em></i
                     ><b>{{ probability(x.probabilities.flat) }}</b></label
                   ><label
-                    >DOWN
+                    >下跌
                     <i
                       ><em
                         :style="{ width: probability(x.probabilities.down) }"
@@ -1862,7 +1911,7 @@ onBeforeUnmount(() => {
                   >
                 </div>
                 <small
-                  >样本 {{ x.sample_count }} · Walk-forward
+                  >样本 {{ x.sample_count }} · 滚动验证
                   {{ x.walk_forward_samples }} · 最近训练
                   {{ timeLabel(x.trained_at).slice(0, 10) }}</small
                 >
@@ -1877,7 +1926,7 @@ onBeforeUnmount(() => {
           </div>
           <section class="terminal-panel evidence-panel">
             <header>
-              <h2>Evidence</h2>
+              <h2>证据</h2>
               <InfoTip term="Prediction" />
             </header>
             <div
@@ -1888,7 +1937,7 @@ onBeforeUnmount(() => {
                 <b>{{ x.label }}</b
                 ><span
                   :class="x.direction === 'positive' ? 'positive' : 'negative'"
-                  >{{ x.direction }} · importance {{ x.importance }}</span
+                  >{{ zh(x.direction) }} · 重要性 {{ x.importance }}</span
                 >
               </div>
             </div>
@@ -1906,77 +1955,77 @@ onBeforeUnmount(() => {
       >
         <div class="action-header quant-research-header">
           <div>
-            <span>PERSONAL QUANT RESEARCH AGENT</span>
+            <span>个人量化研究智能体</span>
             <h2>寻找统计优势，而不是生成买卖口号</h2>
-            <p>数据审计 → 三任务标签 → 五窗口 Walk-Forward → Alpha 排名 → 成本后组合 → 上线门禁</p>
+            <p>数据审计 → 三任务标签 → 五窗口滚动验证 → 超额收益排名 → 成本后组合 → 上线门禁</p>
           </div>
           <button :disabled="quantLoading" @click="runDeepResearch">
-            {{ quantLoading ? "深度研究运行中…" : "Deep Research" }}
+            {{ quantLoading ? "深度研究运行中…" : "开始深度研究" }}
           </button>
         </div>
         <div class="quant-controls terminal-panel">
-          <div><b>市场</b><button v-for="x in ['CN','US','CRYPTO']" :key="x" :class="{active:quantMarket===x}" @click="changeQuantMarket(x)">{{ x }}</button></div>
+          <div><b>市场</b><button v-for="x in ['CN','US','CRYPTO']" :key="x" :class="{active:quantMarket===x}" @click="changeQuantMarket(x)">{{ x==='CN'?'A股':x==='US'?'美股':'加密货币' }}</button></div>
           <div><b>周期</b><button v-for="x in quantMarket==='CRYPTO'?['1H','4H','24H','7D']:['T+1','T+5','T+20']" :key="x" :class="{active:quantHorizon===x}" @click="quantHorizon=x">{{ x }}</button></div>
         </div>
         <div class="quant-status-grid">
-          <article class="terminal-panel"><span>Production Model</span><strong class="negative">{{ quantResult?.production_model || 'NONE' }}</strong><small>模型不得自动上线</small></article>
-          <article class="terminal-panel"><span>Research Decision</span><strong :class="quantResult?.decision==='NO_EDGE'?'negative':'warning'">{{ quantResult?.decision || 'NO EDGE' }}</strong><small>NO EDGE 是有效研究结论</small></article>
-          <article class="terminal-panel"><span>Temporal Audit</span><strong :class="quantResult?.temporal_leakage_audit?.status==='PASSED'?'positive':'warning'">{{ quantResult?.temporal_leakage_audit?.status || '等待运行' }}</strong><small>随机切分：禁止</small></article>
-          <article class="terminal-panel"><span>Uncertainty</span><strong class="warning">{{ quantResult?.uncertainty?.level || 'HIGH' }}</strong><small>高不确定性禁止强方向</small></article>
+          <article class="terminal-panel"><span>生产模型</span><strong class="negative">{{ zh(quantResult?.production_model || 'NONE') }}</strong><small>模型不得自动上线</small></article>
+          <article class="terminal-panel"><span>研究结论</span><strong :class="quantResult?.decision==='NO_EDGE'?'negative':'warning'">{{ zh(quantResult?.decision || 'NO_EDGE') }}</strong><small>“暂无统计优势”也是有效研究结论</small></article>
+          <article class="terminal-panel"><span>时间泄漏审计</span><strong :class="quantResult?.temporal_leakage_audit?.status==='PASSED'?'positive':'warning'">{{ zh(quantResult?.temporal_leakage_audit?.status || '等待运行') }}</strong><small>随机切分：禁止</small></article>
+          <article class="terminal-panel"><span>不确定性</span><strong class="warning">{{ zh(quantResult?.uncertainty?.level || 'HIGH') }}</strong><small>高不确定性禁止强方向</small></article>
         </div>
         <template v-if="quantResult">
           <section class="terminal-panel quant-section">
-            <header><div><span>MODEL LEADERBOARD</span><h2>统一数据与五窗口竞赛</h2></div><b>{{ quantResult.model_tournament?.best_regressor || '无合格模型' }}</b></header>
+            <header><div><span>模型排行榜</span><h2>统一数据与五窗口竞赛</h2></div><b>{{ quantResult.model_tournament?.best_regressor || '无合格模型' }}</b></header>
             <div class="performance-table">
               <article v-for="(model,name) in quantResult.model_tournament?.regression" :key="String(name)">
-                <h3>{{ name }}</h3><strong>Rank IC {{ model.rank_ic?.median ?? '—' }}</strong>
-                <span>IC {{ model.ic?.median ?? '—' }}</span><span>最差窗口 {{ model.rank_ic?.worst ?? '—' }}</span>
+                <h3>{{ name }}</h3><strong>排序相关性 {{ model.rank_ic?.median ?? '—' }}</strong>
+                <span>相关性 {{ model.ic?.median ?? '—' }}</span><span>最差窗口 {{ model.rank_ic?.worst ?? '—' }}</span>
                 <small>正窗口比例 {{ model.rank_ic?.positive_window_ratio ?? '—' }}</small>
               </article>
             </div>
           </section>
           <div class="quant-two-column">
-            <section class="terminal-panel quant-section"><header><h2>Dataset / Label Audit</h2></header>
+            <section class="terminal-panel quant-section"><header><h2>数据集与标签审计</h2></header>
               <p>数据：{{ quantResult.dataset_audit?.status }} · {{ quantResult.dataset_audit?.totals?.candles }} 根K线 · {{ quantResult.dataset_audit?.assets?.length }} 个标的</p>
               <p>目标：收益回归 / ATR动态方向 / 大幅下行风险</p><p>阈值：仅由每个训练窗口确定</p>
             </section>
-            <section class="terminal-panel quant-section"><header><h2>Portfolio After Costs</h2></header>
-              <div v-for="(model,name) in quantResult.portfolio_backtest?.models" :key="String(name)" class="quant-row"><b>{{ name }}</b><span>Top10 {{ model.top10_bottom10?.total_return }} / Top20 {{ model.top20_bottom20?.total_return }} · Sharpe {{ model.top20_bottom20?.sharpe ?? '—' }} · MDD {{ model.top20_bottom20?.maximum_drawdown }}</span></div>
+            <section class="terminal-panel quant-section"><header><h2>扣除成本后的组合表现</h2></header>
+              <div v-for="(model,name) in quantResult.portfolio_backtest?.models" :key="String(name)" class="quant-row"><b>{{ name }}</b><span>前10/后10 {{ model.top10_bottom10?.total_return }} · 前20/后20 {{ model.top20_bottom20?.total_return }} · 夏普比率 {{ model.top20_bottom20?.sharpe ?? '—' }} · 最大回撤 {{ model.top20_bottom20?.maximum_drawdown }}</span></div>
             </section>
           </div>
           <div class="quant-two-column">
-            <section class="terminal-panel quant-section"><header><h2>Factor / SHAP</h2></header>
+            <section class="terminal-panel quant-section"><header><h2>因子贡献分析</h2></header>
               <p v-if="quantResult.explainability?.status!=='AVAILABLE'">{{ quantResult.explainability?.reason || '尚无可审计解释' }}</p>
               <div v-for="x in quantResult.explainability?.top_factors || []" :key="x.feature" class="quant-row"><b>{{ x.feature }}</b><span>SHAP {{ x.shap }}</span></div>
               <small>SHAP 是模型贡献，不是概率。</small>
             </section>
-            <section class="terminal-panel quant-section"><header><h2>Model Drift / Governance</h2></header>
-              <p>{{ quantResult.model_drift?.status || quantDashboard?.model_drift?.status }}</p>
-              <p>Champion：{{ quantResult.champion || 'NONE' }}</p><p>自动重训：关闭</p><p>News：Experimental，生产权重 0</p>
+            <section class="terminal-panel quant-section"><header><h2>模型漂移与治理</h2></header>
+              <p>{{ zh(quantResult.model_drift?.status || quantDashboard?.model_drift?.status) }}</p>
+              <p>当前最佳模型：{{ zh(quantResult.champion || 'NONE') }}</p><p>自动重训：关闭</p><p>新闻因子：实验阶段，生产权重 0</p>
             </section>
           </div>
           <div class="quant-two-column">
-            <section class="terminal-panel quant-section"><header><h2>Factor Ablation</h2></header>
+            <section class="terminal-panel quant-section"><header><h2>因子消融验证</h2></header>
               <div v-for="(factor,name) in quantResult.factor_research?.ablation" :key="String(name)" class="quant-row"><b>{{ name }}</b><span>Rank IC {{ factor.median ?? '—' }} · ICIR {{ factor.icir ?? '—' }} · 正窗口 {{ factor.positive_window_ratio ?? '—' }}</span></div>
             </section>
-            <section class="terminal-panel quant-section"><header><h2>Regime Stability</h2></header>
+            <section class="terminal-panel quant-section"><header><h2>不同市场环境稳定性</h2></header>
               <template v-for="(regimes,model) in quantResult.regime_performance" :key="String(model)"><div v-for="(metric,regime) in regimes" :key="String(model)+String(regime)" class="quant-row"><b>{{ model }} · {{ regime }}</b><span>Rank IC {{ metric.rank_ic?.median ?? '—' }} · {{ metric.samples }} 样本</span></div></template>
             </section>
           </div>
         </template>
-        <div v-else class="empty-state large">选择市场和周期后运行 Deep Research。研究完成前不会展示预填概率或虚构排行榜。</div>
+        <div v-else class="empty-state large">选择市场和周期后开始深度研究。研究完成前不会展示预填概率或虚构排行榜。</div>
       </section>
 
       <section v-else-if="page === 'briefing'" class="workspace briefing-workspace">
         <div class="briefing-trust strip">
-          <div><span>研究状态</span><strong class="warning">{{ traderBriefing?.research_status || "NO EDGE" }}</strong></div>
-          <div><span>生产模型</span><strong>{{ traderBriefing?.production_model || "NONE" }}</strong></div>
+          <div><span>研究状态</span><strong class="warning">{{ zh(traderBriefing?.research_status || "NO_EDGE") }}</strong></div>
+          <div><span>生产模型</span><strong>{{ zh(traderBriefing?.production_model || "NONE") }}</strong></div>
           <div><span>覆盖</span><strong>{{ traderBriefing?.coverage?.completed || 0 }} / {{ traderBriefing?.coverage?.requested || 0 }}</strong></div>
           <div><span>未处理风险提醒</span><strong :class="traderBriefing?.alerts?.length ? 'negative' : 'positive'">{{ traderBriefing?.alerts?.length || 0 }}</strong></div>
           <small>这里优先关闭错误行动，不输出自动买卖指令。</small>
         </div>
         <div class="briefing-actions">
-          <div><span>DAILY WATCHLIST BRIEF</span><h2>自选风险与证据变化</h2><p>{{ traderBriefing?.notice }}</p></div>
+          <div><span>每日自选简报</span><h2>自选风险与证据变化</h2><p>{{ traderBriefing?.notice }}</p></div>
           <button @click="exportBriefing" :disabled="!traderBriefing?.items?.length">导出可审计报告</button>
           <button class="primary" @click="loadTraderBriefing(true)" :disabled="traderBriefing?.refresh?.status === 'RUNNING'">
             {{ traderBriefing?.refresh?.status === "RUNNING" ? "后台评估中…" : "刷新全部自选" }}
@@ -1998,7 +2047,7 @@ onBeforeUnmount(() => {
         <div v-else class="briefing-grid">
           <article v-for="x in traderBriefing.items" :key="x.asset_type + x.symbol" class="terminal-panel briefing-card">
             <header>
-              <div><span>{{ x.decision_gate }}</span><h2>{{ x.name }} <small>{{ x.symbol }}</small></h2></div>
+              <div><span>{{ zh(x.decision_gate) }}</span><h2>{{ x.name }} <small>{{ x.symbol }}</small></h2></div>
               <b :class="x.decision_gate === 'RISK_REVIEW' ? 'negative' : x.decision_gate === 'WATCH_ONLY' ? 'warning' : 'neutral'">{{ x.next_action }}</b>
             </header>
             <div class="briefing-score">
@@ -2021,7 +2070,7 @@ onBeforeUnmount(() => {
         <div class="method-banner">
           <b>验证方法</b><span>{{ modelLab.validation }}</span
           ><small
-            >Accuracy
+            >准确率
             是历史样本外结果，不代表未来表现；空值不会用估算补齐。</small
           >
         </div>
@@ -2035,17 +2084,17 @@ onBeforeUnmount(() => {
               <h2>{{ asset.symbol }}</h2>
               <span>{{ asset.model_version }}</span>
             </div>
-            <b :class="statusTone(asset.status)">{{ asset.status }}</b>
+            <b :class="statusTone(asset.status)">{{ zh(asset.status) }}</b>
           </header>
           <div v-if="asset.periods.length" class="performance-table">
             <article v-for="x in asset.periods" :key="x.horizon">
               <h3>{{ x.horizon }}</h3>
               <strong>{{ x.accuracy }}%</strong
               ><span
-                >Baseline
+                >基准
                 {{ x.baseline == null ? "未披露" : x.baseline + "%" }}</span
               ><span
-                >Edge
+                >相对优势
                 {{
                   x.edge == null
                     ? "不可计算"
@@ -2061,27 +2110,27 @@ onBeforeUnmount(() => {
                 "
                 >{{ x.evidence_level }}</b
               ><small
-                >Precision
-                {{ x.precision == null ? "不可复算" : x.precision }} · Brier
+                >精确率
+                {{ x.precision == null ? "不可复算" : x.precision }} · 概率误差
                 {{ x.brier_score == null ? "不可复算" : x.brier_score }}</small
               ><small
-                >IC {{ x.ic == null ? "不可复算" : x.ic }} · Rank IC
-                {{ x.rank_ic == null ? "不可复算" : x.rank_ic }} · ICIR
-                {{ x.icir == null ? "样本不足" : x.icir }} · Sharpe
+                >相关性 {{ x.ic == null ? "不可复算" : x.ic }} · 排序相关性
+                {{ x.rank_ic == null ? "不可复算" : x.rank_ic }} · 稳定比率
+                {{ x.icir == null ? "样本不足" : x.icir }} · 夏普比率
                 {{ x.sharpe == null ? "不可复算" : x.sharpe }}</small
               ><small v-if="x.note">{{ x.note }}</small>
             </article>
           </div>
           <div v-else class="empty-state">
             该资产尚无 T+1/T+5/T+20
-            可复核样本外结果。运行并积累预测后才会显示；Precision / Recall / F1
-            / MAE 均不伪造。
+            可复核样本外结果。运行并积累预测后才会显示；精确率、召回率、综合评分
+            和平均误差均不伪造。
           </div>
           <div v-if="asset.resolved_history.length" class="resolved-list">
             <b>本机已结算预测历史</b
             ><span v-for="x in asset.resolved_history" :key="x.horizon"
-              >{{ x.horizon }} · {{ x.samples }} 样本 · Accuracy
-              {{ x.accuracy }}% · MAE {{ x.mae }}%</span
+              >{{ x.horizon }} · {{ x.samples }} 样本 · 准确率
+              {{ x.accuracy }}% · 平均误差 {{ x.mae }}%</span
             >
           </div>
         </section>
@@ -2126,7 +2175,7 @@ onBeforeUnmount(() => {
         <section v-if="newsReportAsset" class="terminal-panel watch-report">
           <header>
             <div>
-              <span>WATCHLIST INTELLIGENCE REPORT</span>
+              <span>自选新闻情报报告</span>
               <h2>
                 {{ newsReportAsset.name || newsReportAsset.symbol }} ·
                 近期新闻与数学模型评估
@@ -2249,7 +2298,7 @@ onBeforeUnmount(() => {
         class="workspace strategy-workspace"
       >
         <div v-if="page === 'strategy'" class="strategy-builder">
-          <span>NATURAL LANGUAGE STRATEGY</span
+          <span>自然语言策略</span
           ><textarea v-model="strategyText"></textarea
           ><button @click="parseStrategy">转换为可执行规则</button>
           <div
@@ -2331,7 +2380,7 @@ onBeforeUnmount(() => {
               >
             </div>
             <div>
-              <span>Sharpe</span
+              <span>夏普比率</span
               ><b>{{ number(backtestResult.sharpe_ratio, 3) }}</b>
             </div>
             <div>
@@ -2377,7 +2426,7 @@ onBeforeUnmount(() => {
         <div class="paper-terminal">
           <section class="terminal-panel positions-pane">
             <header>
-              <h2>Positions</h2>
+              <h2>当前持仓</h2>
               <span>{{ positions.length }}</span>
             </header>
             <button
@@ -2412,36 +2461,36 @@ onBeforeUnmount(() => {
           </section>
           <section class="terminal-panel order-ticket">
             <header>
-              <h2>Order Ticket</h2>
+              <h2>模拟下单</h2>
               <span>模拟账户</span>
             </header>
             <div class="buy-sell">
-              <button class="buy" @click="pendingSide = 'BUY'">Buy</button
-              ><button class="sell" @click="pendingSide = 'SELL'">Sell</button>
+              <button class="buy" @click="pendingSide = 'BUY'">买入</button
+              ><button class="sell" @click="pendingSide = 'SELL'">卖出</button>
             </div>
             <label
-              >Order Type<select v-model="orderType">
-                <option>MARKET</option>
-                <option>LIMIT</option>
+              >订单类型<select v-model="orderType">
+                <option value="MARKET">市价</option>
+                <option value="LIMIT">限价</option>
               </select></label
             ><label
-              >Quantity<input
+              >数量<input
                 v-model.number="orderQuantity"
                 type="number"
                 min="0.0001"
                 step="0.0001" /></label
             ><label v-if="orderType === 'LIMIT'"
-              >Limit Price<input v-model.number="orderLimitPrice" type="number"
+              >限价价格<input v-model.number="orderLimitPrice" type="number"
             /></label>
             <div class="estimate">
-              <span>Estimated price</span
+              <span>预计价格</span
               ><b>{{
                 money(
                   orderType === "LIMIT" ? orderLimitPrice : quote?.price,
                   quote?.currency,
                 )
               }}</b
-              ><span>Estimated amount</span
+              ><span>预计金额</span
               ><b>{{
                 money(
                   Number(orderQuantity) *
@@ -2465,7 +2514,7 @@ onBeforeUnmount(() => {
               :class="pendingSide === 'BUY' ? 'buy' : 'sell'"
               @click="confirmOrder(pendingSide)"
             >
-              Review {{ pendingSide }}
+              复核{{ pendingSide === "BUY" ? "买入" : "卖出" }}
             </button>
           </section>
         </div>
@@ -2473,10 +2522,10 @@ onBeforeUnmount(() => {
           <div class="tabs">
             <button
               v-for="x in [
-                ['orders', 'Open Orders'],
-                ['positions', 'Positions'],
-                ['trades', 'Trades'],
-                ['history', 'History'],
+                ['orders', '待处理订单'],
+                ['positions', '当前持仓'],
+                ['trades', '已成交'],
+                ['history', '全部历史'],
               ]"
               :key="x[0]"
               :class="{ active: paperTab === x[0] }"
@@ -2489,12 +2538,12 @@ onBeforeUnmount(() => {
             <thead>
               <tr>
                 <th>ID</th>
-                <th>Symbol</th>
-                <th>Side</th>
-                <th>Type</th>
-                <th>Qty</th>
-                <th>Price</th>
-                <th>Status</th>
+                <th>代码</th>
+                <th>方向</th>
+                <th>类型</th>
+                <th>数量</th>
+                <th>价格</th>
+                <th>状态</th>
                 <th></th>
               </tr>
             </thead>
@@ -2514,12 +2563,12 @@ onBeforeUnmount(() => {
                 <td>{{ x.id }}</td>
                 <td>{{ x.symbol }}</td>
                 <td :class="x.side === 'BUY' ? 'positive' : 'negative'">
-                  {{ x.side }}
+                  {{ x.side === "BUY" ? "买入" : "卖出" }}
                 </td>
-                <td>{{ x.order_type }}</td>
+                <td>{{ zh(x.order_type) }}</td>
                 <td>{{ number(x.quantity, 4) }}</td>
                 <td>{{ number(x.price) }}</td>
-                <td>{{ x.status }}</td>
+                <td>{{ zh(x.status) }}</td>
                 <td>
                   <button
                     v-if="x.status === 'pending'"
@@ -2544,11 +2593,11 @@ onBeforeUnmount(() => {
 
       <section v-else-if="page === 'copilot'" class="workspace copilot-page">
         <div class="copilot-intro">
-          <span>TOOL-AUGMENTED MARKET ANALYSIS</span>
+          <span>调用真实工具的市场分析</span>
           <h2>不是独立聊天机器人</h2>
           <p>
             每次回答都会先调用本系统的真实行情、K线指标、新闻数据库或 AI
-            Screener，并显示工具记录与数据截止时间。
+            智能选股器，并显示工具记录与数据截止时间。
           </p>
           <div>
             <button @click="askCopilot('分析NVDA')">分析 NVDA</button
@@ -2565,10 +2614,10 @@ onBeforeUnmount(() => {
             <article v-for="(x, i) in copilotMessages" :key="i" :class="x.role">
               <b>{{
                 x.role === "user"
-                  ? "YOU"
+                  ? "你"
                   : x.role === "error"
-                    ? "ERROR"
-                    : "COPILOT"
+                    ? "错误"
+                    : "AI助手"
               }}</b>
               <p>{{ x.text }}</p>
               <div v-if="x.tools" class="tool-calls">
@@ -2601,7 +2650,7 @@ onBeforeUnmount(() => {
         </nav>
         <section class="terminal-panel">
           <header>
-            <h2>Data Health</h2>
+            <h2>数据健康状态</h2>
             <small>检查 {{ timeLabel(dataHealth?.checked_at) }}</small>
           </header>
           <div class="health-list">
@@ -2612,7 +2661,7 @@ onBeforeUnmount(() => {
                 ><span>{{ x.source }}</span
                 ><small>{{ x.mode }} · {{ x.realtime }}</small>
               </div>
-              <strong>{{ x.status }}</strong
+              <strong>{{ zh(x.status) }}</strong
               ><time>{{ timeLabel(x.last_update) }}</time>
             </article>
           </div>
@@ -2624,8 +2673,8 @@ onBeforeUnmount(() => {
           <section class="terminal-panel settings-card">
             <h2>AI 模型</h2>
             <p>
-              PerformanceWeightedEnsemble · 因果特征 · Purged split ·
-              Walk-forward。
+              按历史表现加权的集成模型 · 因果特征 · 防泄漏切分 ·
+              时间序列滚动验证。
             </p>
             <span>深度模型在单资产样本不足时禁用，不冒充可用。</span
             ><button @click="nav('modelLab')">查看模型表现</button>
@@ -2654,11 +2703,11 @@ onBeforeUnmount(() => {
       class="copilot-fab"
       @click="copilotOpen = !copilotOpen"
     >
-      ✦<span>AI Copilot</span>
+      ✦<span>AI 市场助手</span>
     </button>
     <aside v-if="copilotOpen && page !== 'copilot'" class="copilot-drawer">
       <header>
-        <b>AI Market Copilot</b><button @click="copilotOpen = false">×</button>
+        <b>AI 市场助手</b><button @click="copilotOpen = false">×</button>
       </header>
       <div class="copilot-thread">
         <article v-for="(x, i) in copilotMessages" :key="i" :class="x.role">
@@ -2680,12 +2729,12 @@ onBeforeUnmount(() => {
       width="440px"
       class="order-dialog"
       ><div class="confirm-order">
-        <b>{{ selected?.symbol }} · {{ pendingSide }}</b
+        <b>{{ selected?.symbol }} · {{ pendingSide === "BUY" ? "买入" : "卖出" }}</b
         ><span
           >{{ number(orderQuantity, 4) }}
-          {{ selected?.asset_type === "crypto" ? "coins" : "shares" }}</span
+          {{ selected?.asset_type === "crypto" ? "枚" : "股" }}</span
         ><span
-          >{{ orderType }} · Estimated
+          >{{ zh(orderType) }} · 预计价格
           {{
             money(
               orderType === "LIMIT" ? orderLimitPrice : quote?.price,
@@ -2720,7 +2769,7 @@ onBeforeUnmount(() => {
     <el-dialog v-model="newsDialogOpen" width="720px" class="news-dialog"
       ><template #header
         ><div>
-          <span>EVENT IMPACT · 事件影响分析</span>
+          <span>事件影响分析</span>
           <h2>{{ newsSelected?.title }}</h2>
         </div></template
       >

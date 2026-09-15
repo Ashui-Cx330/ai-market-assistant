@@ -1,6 +1,6 @@
 # AI行情助手
 
-当前正式版本 v1.15.1 新增并修正 Trader Decision Desk：把自选资产的行情新鲜度、新闻、技术证据、失效线与状态变化聚合为本地持久化简报。页面先读本地快照、后台刷新外部数据；过期数据会关闭决策门，失效线越界与高影响新闻会生成可复核提醒。真实审计仍为 `NO EDGE`，`Production Model = NONE`，不会将研究观察包装成买卖建议。
+当前正式版本 v1.16.0 将 A股、美股、热门币种拆分为独立行情入口，新增主流 Crypto 与热门股观察池，导航改为立即切页并复用各市场短期快照。行情缓存会自动删除过期记录并限制数量，界面中的市场分析、模型状态、模拟交易和数据健康说明已中文化。真实审计仍为 `NO EDGE`，`Production Model = NONE`，不会将研究观察包装成买卖建议。
 
 上一正式版本 v1.10.5 已将行情页面改为 stale-while-revalidate，避免后台 SQLite 缓存争用阻塞点击；新闻中心只展示明确关联自选资产的快讯，并生成融合 V5 技术策略、ICT/SMC、FVG/BOS、Fibonacci、ATR 和新闻时间衰减的多空风险报告。
 
@@ -8,7 +8,7 @@
 
 ## Windows 安装
 
-双击 `outputs\desktop\AI-Market-Assistant-Setup-v1.15.1.exe` 完成安装。桌面会出现“AI行情助手”，以后直接双击即可；无需打开项目目录、Python、Node、Docker 或命令行。
+双击 `outputs\desktop\AI-Market-Assistant-Setup-v1.16.0.exe` 完成安装。桌面会出现“AI行情助手”，以后直接双击即可；无需打开项目目录、Python、Node、Docker 或命令行。
 
 - 程序目录：`%LOCALAPPDATA%\Programs\AI行情助手`
 - 用户数据：`%APPDATA%\AI行情助手`

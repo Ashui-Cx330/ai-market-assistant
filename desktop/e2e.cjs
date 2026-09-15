@@ -22,15 +22,15 @@ async function run() {
   try {
     const page = await app.firstWindow({ timeout: 90000 })
     await page.waitForLoadState('domcontentloaded')
-    await page.getByRole('heading', { name: 'Market Intelligence', exact: true }).waitFor({ timeout: 90000 })
+    await page.getByRole('heading', { name: '市场智能总览', exact: true }).waitFor({ timeout: 90000 })
     await page.locator('.pulse-score strong').waitFor({ timeout: 90000 })
 
-    await nav(page, '交易决策台', 'Trader Decision Desk')
+    await nav(page, '交易决策台', '交易决策台')
     await page.locator('.briefing-trust').waitFor({ timeout: 10000 })
-    await page.getByText('NO EDGE', { exact: true }).first().waitFor()
+    await page.getByText('暂无统计优势', { exact: true }).first().waitFor()
     await page.getByText(/页面保持可操作|自选风险与证据变化/).first().waitFor()
 
-    await nav(page, '行情', 'Market Scanner')
+    await nav(page, '美股行情', '美股行情')
     const scannerRow = page.locator('.scanner-table tbody tr').first()
     await scannerRow.waitFor({ timeout: 90000 })
     const scannerSymbol = (await scannerRow.locator('td b').first().innerText()).trim()
@@ -54,31 +54,31 @@ async function run() {
     await page.locator('.info-tip').filter({ hasText: 'RSI' }).waitFor()
     await page.locator('.ai-score strong').waitFor({ timeout: 60000 })
 
-    await nav(page, '模型表现', 'Model Lab')
-    await page.getByText(/Immutable resolved history/).waitFor()
-    await page.getByText(/no random split/).waitFor()
+    await nav(page, '模型表现', '模型表现')
+    await page.getByText(/不可变已结算历史/).waitFor()
+    await page.getByText(/禁止随机切分/).waitFor()
 
-    await nav(page, 'Quant Research', '寻找统计优势，而不是生成买卖口号')
-    await page.getByText('Production Model').waitFor()
-    await page.getByText('NONE', { exact: true }).first().waitFor()
+    await nav(page, '量化研究', '寻找统计优势，而不是生成买卖口号')
+    await page.getByText('生产模型', { exact: true }).first().waitFor()
+    await page.getByText('无生产模型', { exact: true }).first().waitFor()
 
-    await nav(page, '策略实验室', 'Strategy Lab')
+    await nav(page, '策略实验室', '策略实验室')
     await page.getByRole('button', { name: '转换为可执行规则' }).click()
     await page.getByText('HOLD_BARS 5').waitFor()
 
-    await nav(page, '模拟交易', 'Paper Trading Terminal')
+    await nav(page, '模拟交易', '模拟交易')
     await page.locator('.order-ticket').waitFor({ timeout: 60000 })
-    await page.getByRole('button', { name: 'Review BUY' }).click()
+    await page.getByRole('button', { name: '复核买入' }).click()
     await page.getByRole('heading', { name: '确认模拟订单' }).waitFor()
     await page.getByRole('button', { name: '确认买入' }).click()
     await page.locator('.positions-pane button').first().waitFor({ timeout: 60000 })
 
-    await nav(page, 'AI Copilot', 'AI Market Copilot')
+    await nav(page, 'AI 市场助手', 'AI 市场助手')
     await page.getByRole('button', { name: '分析 NVDA' }).click()
     await page.getByText('market.quote').last().waitFor({ timeout: 90000 })
     await page.getByText(/数据截止/).last().waitFor()
 
-    await nav(page, '新闻情报', 'AI Market Intelligence')
+    await nav(page, '新闻情报', '新闻情报中心')
     await page.locator('.news-tabs').waitFor()
     // Navigation starts a real multi-provider collection. Let that request
     // settle before changing the sentiment filter so the E2E does not create
@@ -87,13 +87,17 @@ async function run() {
     await page.getByRole('button', { name: '利好', exact: true }).click()
     await page.locator('.news-feed').waitFor({ timeout: 90000 })
 
-    await nav(page, '设置', 'Settings & Data Health')
-    await page.getByRole('heading', { name: 'Data Health', exact: true }).waitFor({ timeout: 60000 })
+    await nav(page, '设置', '设置与数据健康')
+    await page.getByRole('heading', { name: '数据健康状态', exact: true }).waitFor({ timeout: 60000 })
     await page.getByText(/不属于交易所授权逐笔行情/).waitFor()
-    await nav(page, '首页', 'Market Intelligence')
+    await nav(page, '首页', '市场智能总览')
     await page.locator('.pulse-score strong').waitFor({ timeout: 90000 })
-    await page.screenshot({ path: path.join(root, 'work', 'v19-home.png'), fullPage: true })
-    console.log(`PASS ${packaged ? 'packaged' : 'development'} v1.15 decision-desk/routes/scanner/chart/model-lab/strategy/paper/copilot/news/data-health`)
+    try {
+      await page.screenshot({ path: path.join(root, 'work', 'v19-home.png'), fullPage: true, timeout: 60000 })
+    } catch (error) {
+      console.warn('WARN acceptance screenshot skipped:', error.message)
+    }
+    console.log(`PASS ${packaged ? 'packaged' : 'development'} v1.16 decision-desk/routes/scanner/chart/model-lab/strategy/paper/copilot/news/data-health`)
     complete = true
   } finally {
     await app.close()

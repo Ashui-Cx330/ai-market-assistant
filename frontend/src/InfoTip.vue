@@ -13,5 +13,9 @@ const definitions:Record<string,string>={
   'Impact Score':'新闻事件方向、幅度、关联资产和时效性的规则化影响分，不是价格预测。',
   'Risk Score':'根据波动率、极端动量与负面新闻计算的当前风险强度，分数越高风险越高。',
 }
+const labels:Record<string,string>={
+  'AI Score':'智能评分','Prediction':'预测说明','Confidence':'置信度','Volume Ratio':'量比',
+  'Impact Score':'新闻影响分','Risk Score':'风险评分',
+}
 </script>
-<template><span class="info-tip" tabindex="0">{{term}} <i>i</i><span class="info-pop">{{definitions[term]||'该指标来自当前系统真实数据和可审计规则。'}}</span></span></template>
+<template><span class="info-tip" tabindex="0">{{labels[term]||term}} <i>i</i><span class="info-pop">{{definitions[term]||'该指标来自当前系统真实数据和可审计规则。'}}</span></span></template>

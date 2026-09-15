@@ -11,6 +11,8 @@ from typing import Any
 
 
 class TTLCache:
+    MAX_DISK_ITEMS = 120
+
     def __init__(self) -> None:
         self._items: dict[str, tuple[float, Any]] = {}
         self._lock = RLock()
@@ -19,7 +21,18 @@ class TTLCache:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self._path)) as connection:
             connection.execute("CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, expires REAL NOT NULL, value TEXT NOT NULL)")
+            before = connection.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
+            connection.execute("DELETE FROM cache WHERE expires<=?", (time.time(),))
+            connection.execute("""DELETE FROM cache WHERE key IN (
+                SELECT key FROM cache ORDER BY expires ASC LIMIT MAX(0,(SELECT COUNT(*) FROM cache)-?)
+            )""", (self.MAX_DISK_ITEMS,))
             connection.commit()
+            # The cache is disposable. Reclaim pages only when startup cleanup
+            # removed data and the file is materially large; never VACUUM the
+            # user's durable application database.
+            after = connection.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
+            if before > after and self._path.stat().st_size > 4 * 1024 * 1024:
+                connection.execute("VACUUM")
 
     def get(self, key: str) -> Any | None:
         with self._lock:
@@ -86,7 +99,9 @@ class TTLCache:
 
     def set(self, key: str, value: Any, ttl: int) -> Any:
         with self._lock:
-            self._items[key] = (time.monotonic() + ttl, value)
+            now_mono = time.monotonic()
+            self._items = {saved_key: item for saved_key, item in self._items.items() if item[0] > now_mono}
+            self._items[key] = (now_mono + ttl, value)
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
@@ -94,6 +109,10 @@ class TTLCache:
                 connection.execute("CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, expires REAL NOT NULL, value TEXT NOT NULL)")
                 connection.execute("INSERT INTO cache(key,expires,value) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET expires=excluded.expires,value=excluded.value",
                                    (key, time.time() + ttl, encoded))
+                connection.execute("DELETE FROM cache WHERE expires<=?", (time.time(),))
+                connection.execute("""DELETE FROM cache WHERE key IN (
+                    SELECT key FROM cache ORDER BY expires ASC LIMIT MAX(0,(SELECT COUNT(*) FROM cache)-?)
+                )""", (self.MAX_DISK_ITEMS,))
                 connection.commit()
         except (TypeError, ValueError, sqlite3.Error):
             pass

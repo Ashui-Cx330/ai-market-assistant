@@ -1,6 +1,15 @@
 # AI行情助手自动更新与发布
 
-当前正式版本：**v1.15.1**。更新仓库：`Ashui-Cx330/ai-market-assistant`。GitHub Release 同时发布 Windows 安装包、`.blockmap` 和 `latest.yml`，旧版客户端可据此检查、下载并安装更新。
+当前正式版本：**v1.16.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。GitHub Release 同时发布 Windows 安装包、`.blockmap` 和 `latest.yml`，旧版客户端可据此检查、下载并安装更新。
+
+## v1.16.0 / 市场分区、缓存治理与中文界面
+
+- 侧栏新增独立的“A股行情”“美股行情”“热门币种”入口，旧 `/market` 路由兼容跳转到 A股行情。
+- 扩充热门币种观察池：BNB、XRP、DOGE、ADA、AVAX、LINK、DOT、TRX、TON、SUI、LTC、BCH、UNI、AAVE、NEAR、APT、FIL、ARB、OP 等。
+- 扩充常用 A股、美股和 ETF 观察池；所有展示行仍需从公开行情源取得真实价格，不生成假行情。
+- 导航不再等待行情请求完成才结束，先显示对应页面，再异步加载；A股、美股、Crypto 分别保留一个前端短期快照。
+- 本地行情缓存启动时自动删除过期记录，最多保留 120 条，并在大量过期数据被删除时回收磁盘空间。
+- 首页、行情表、AI功能分析、模型表现、量化研究、模拟交易、数据健康和 AI 助手的用户可见说明统一为中文。
 
 ## v1.15.1 / Freshness Semantics Fix
 

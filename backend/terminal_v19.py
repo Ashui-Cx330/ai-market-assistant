@@ -52,6 +52,45 @@ ASSETS = [
     {"symbol":"SOL","name":"Solana","asset_type":"crypto","market":"Crypto","industry":"智能合约"},
     {"symbol":"TSLA","name":"Tesla","asset_type":"stock","market":"美股","industry":"汽车"},
     {"symbol":"MSFT","name":"Microsoft","asset_type":"stock","market":"美股","industry":"软件 / AI"},
+    {"symbol":"000001","name":"平安银行","asset_type":"stock","market":"A股","industry":"金融"},
+    {"symbol":"000858","name":"五粮液","asset_type":"stock","market":"A股","industry":"消费"},
+    {"symbol":"601318","name":"中国平安","asset_type":"stock","market":"A股","industry":"金融"},
+    {"symbol":"600036","name":"招商银行","asset_type":"stock","market":"A股","industry":"金融"},
+    {"symbol":"601899","name":"紫金矿业","asset_type":"stock","market":"A股","industry":"资源"},
+    {"symbol":"002594","name":"比亚迪","asset_type":"stock","market":"A股","industry":"新能源车"},
+    {"symbol":"600900","name":"长江电力","asset_type":"stock","market":"A股","industry":"电力"},
+    {"symbol":"002475","name":"立讯精密","asset_type":"stock","market":"A股","industry":"电子"},
+    {"symbol":"300059","name":"东方财富","asset_type":"stock","market":"A股","industry":"金融科技"},
+    {"symbol":"688981","name":"中芯国际","asset_type":"stock","market":"A股","industry":"半导体"},
+    {"symbol":"AMZN","name":"Amazon","asset_type":"stock","market":"美股","industry":"科技 / 消费"},
+    {"symbol":"META","name":"Meta","asset_type":"stock","market":"美股","industry":"科技 / AI"},
+    {"symbol":"GOOGL","name":"Alphabet","asset_type":"stock","market":"美股","industry":"科技 / AI"},
+    {"symbol":"AVGO","name":"Broadcom","asset_type":"stock","market":"美股","industry":"半导体"},
+    {"symbol":"TSM","name":"台积电ADR","asset_type":"stock","market":"美股","industry":"半导体"},
+    {"symbol":"NFLX","name":"Netflix","asset_type":"stock","market":"美股","industry":"流媒体"},
+    {"symbol":"PLTR","name":"Palantir","asset_type":"stock","market":"美股","industry":"软件 / AI"},
+    {"symbol":"COIN","name":"Coinbase","asset_type":"stock","market":"美股","industry":"数字资产"},
+    {"symbol":"SPY","name":"标普500 ETF","asset_type":"stock","market":"美股","industry":"ETF"},
+    {"symbol":"QQQ","name":"纳斯达克100 ETF","asset_type":"stock","market":"美股","industry":"ETF"},
+    {"symbol":"BNB","name":"BNB","asset_type":"crypto","market":"Crypto","industry":"平台币"},
+    {"symbol":"XRP","name":"XRP","asset_type":"crypto","market":"Crypto","industry":"支付"},
+    {"symbol":"DOGE","name":"Dogecoin","asset_type":"crypto","market":"Crypto","industry":"热门币"},
+    {"symbol":"ADA","name":"Cardano","asset_type":"crypto","market":"Crypto","industry":"智能合约"},
+    {"symbol":"AVAX","name":"Avalanche","asset_type":"crypto","market":"Crypto","industry":"智能合约"},
+    {"symbol":"LINK","name":"Chainlink","asset_type":"crypto","market":"Crypto","industry":"预言机"},
+    {"symbol":"DOT","name":"Polkadot","asset_type":"crypto","market":"Crypto","industry":"跨链"},
+    {"symbol":"TRX","name":"TRON","asset_type":"crypto","market":"Crypto","industry":"智能合约"},
+    {"symbol":"TON","name":"Toncoin","asset_type":"crypto","market":"Crypto","industry":"公链"},
+    {"symbol":"SUI","name":"Sui","asset_type":"crypto","market":"Crypto","industry":"公链"},
+    {"symbol":"LTC","name":"Litecoin","asset_type":"crypto","market":"Crypto","industry":"支付"},
+    {"symbol":"BCH","name":"Bitcoin Cash","asset_type":"crypto","market":"Crypto","industry":"支付"},
+    {"symbol":"UNI","name":"Uniswap","asset_type":"crypto","market":"Crypto","industry":"DeFi"},
+    {"symbol":"AAVE","name":"Aave","asset_type":"crypto","market":"Crypto","industry":"DeFi"},
+    {"symbol":"NEAR","name":"NEAR","asset_type":"crypto","market":"Crypto","industry":"公链"},
+    {"symbol":"APT","name":"Aptos","asset_type":"crypto","market":"Crypto","industry":"公链"},
+    {"symbol":"FIL","name":"Filecoin","asset_type":"crypto","market":"Crypto","industry":"存储"},
+    {"symbol":"ARB","name":"Arbitrum","asset_type":"crypto","market":"Crypto","industry":"Layer 2"},
+    {"symbol":"OP","name":"Optimism","asset_type":"crypto","market":"Crypto","industry":"Layer 2"},
 ]
 
 
@@ -308,7 +347,10 @@ def _market_status() -> list[dict]:
 
 @router.post("/scanner")
 async def scanner(body: ScannerRequest) -> dict:
-    return {"success":True,"data":await scan_assets(body),"source":"public market APIs + locally persisted public news"}
+    # The dedicated crypto workspace should expose the complete curated hot-coin
+    # universe. Other workspaces keep the smaller cap to minimise cold-start work.
+    limit = 30 if body.market == "Crypto" else 20
+    return {"success":True,"data":await scan_assets(body, limit=limit),"source":"公开市场接口 + 本机持久化公开新闻"}
 
 
 @router.post("/asset-workspace")
@@ -323,7 +365,7 @@ async def asset_workspace(body: AssetWorkspaceRequest) -> dict:
     except TimeoutError as exc:
         raise HTTPException(504,"公开行情源响应超过30秒，请稍后重试") from exc
     indicators=await asyncio.to_thread(indicator_payload,candles)
-    market="Crypto" if asset_type=="crypto" else "A股" if canonical.isdigit() else "美股"
+    market="Crypto" if asset_type=="crypto" else "A股" if canonical.split(".")[0].isdigit() else "美股"
     meta={"symbol":canonical,"name":body.name or quote.get("name") or canonical,"asset_type":asset_type,
           "market":market,"industry":"详情资产"}
     analysis=await _compose_analysis(meta,quote,candles,source,indicators)
@@ -655,7 +697,7 @@ def model_lab(symbol: str | None = None) -> dict:
     live={}
     for row in rows:
         live.setdefault(row["symbol"],[]).append({"horizon":row["horizon"],"samples":row["samples"],"accuracy":round(float(row["accuracy"])*100,2) if row["accuracy"] is not None else None,
-                                                  "mae":round(float(row["mae"])*100,3) if row["mae"] is not None else None,"source":"local resolved prediction history"})
+                                                  "mae":round(float(row["mae"])*100,3) if row["mae"] is not None else None,"source":"本机已结算预测历史"})
     statistics=prediction_statistics();assets=[]
     for name,history in live.items():
         periods=[]
@@ -663,16 +705,16 @@ def model_lab(symbol: str | None = None) -> dict:
             metric=statistics["by_horizon"].get(item["horizon"],{})
             periods.append({"horizon":item["horizon"],"accuracy":item["accuracy"],"baseline":None,"edge":None,
                 "assessment":"NO_EDGE" if metric.get("samples",0)<100 else "REQUIRES_BENCHMARK",
-                "evidence_level":"D — Experimental" if metric.get("samples",0)<100 else "C — Requires baseline comparison",
+                "evidence_level":"D级—实验阶段" if metric.get("samples",0)<100 else "C级—需要与基准比较",
                 "precision":metric.get("precision_macro"),"recall":metric.get("recall_macro"),"f1":metric.get("f1_macro"),
                 "brier_score":metric.get("brier_score"),"log_loss":metric.get("log_loss"),"ic":metric.get("ic"),
                 "rank_ic":metric.get("rank_ic"),"icir":metric.get("icir"),"sharpe":metric.get("sharpe"),
                 "confidence_interval_95":None,"note":"仅来自本机不可变结算历史；未达到生产晋级条件。"})
-        assets.append({"symbol":name,"status":"EXPERIMENTAL","model_version":"6.0 Quant Intelligence V2",
+        assets.append({"symbol":name,"status":"EXPERIMENTAL","model_version":"6.0 量化研究模型 V2",
                        "periods":periods,"resolved_history":history,"sample_count":sum(x["samples"] for x in history),
                        "training_range":None,"test_range":None,"notice":"不再展示旧版静态审计常量；缺失指标保持为空。"})
     if symbol: assets=[x for x in assets if x["symbol"]==symbol.upper()]
-    return {"success":True,"data":{"assets":assets,"overall":statistics["overall"],"validation":"Immutable resolved history + purged expanding walk-forward benchmark; no random split and no static showcase metrics",
+    return {"success":True,"data":{"assets":assets,"overall":statistics["overall"],"validation":"不可变已结算历史 + 防泄漏扩展窗口滚动验证；禁止随机切分，不使用静态展示指标",
                                      "generated_at":datetime.now(timezone.utc).isoformat()}}
 
 
@@ -687,8 +729,8 @@ async def data_health() -> dict:
     items=[
         {"name":"A股",**health(0,"东方财富 / 腾讯证券备用","增量轮询","公开行情，交易时段轮询")},
         {"name":"美股",**health(1,"Yahoo Finance public chart API","增量轮询","可能延迟，不是交易所授权逐笔行情")},
-        {"name":"Crypto",**health(2,"OKX / Coinbase备用","WebSocket + REST fallback","交易所公开流")},
-        {"name":"News","status":"CONNECTED" if any(x.get("status")=="CONNECTED" for x in providers) else "STALE" if any(x.get("status")=="STALE" for x in providers) else "DEGRADED","mode":"多源采集 + SQLite缓存","source":"independent public providers","last_update":max((x.get("last_check") or "" for x in providers),default=""),"details":providers},
+        {"name":"加密货币",**health(2,"OKX / Coinbase备用","实时推送 + 接口备用","交易所公开流")},
+        {"name":"新闻","status":"CONNECTED" if any(x.get("status")=="CONNECTED" for x in providers) else "STALE" if any(x.get("status")=="STALE" for x in providers) else "DEGRADED","mode":"多源采集 + 本地数据库缓存","source":"独立公开新闻源","last_update":max((x.get("last_check") or "" for x in providers),default=""),"details":providers},
         {"name":"AI","status":"CONNECTED","mode":"本地模型","source":"scikit-learn ensemble / optional boosters","last_update":now},
     ]
     return {"success":True,"data":{"items":items,"checked_at":now,"database":"SQLite user data directory","notice":"连接状态表示服务链路可用，不代表每个外部源在所有网络环境都无延迟。"}}

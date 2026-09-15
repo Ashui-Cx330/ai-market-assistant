@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from backend.terminal_v19 import (_market_pair, _scanner_indicator_summary, _score,
+from backend.terminal_v19 import (ASSETS, _market_pair, _scanner_indicator_summary, _score,
                                   _briefing_item, _watchlist_news_payload, _weighted_news_score,
                                   parse_strategy_text)
 
@@ -103,3 +103,11 @@ def test_crypto_daily_candle_timestamp_does_not_override_fresh_quote():
     assert item["is_stale"] is False
     assert item["evidence_grade"]=="C"
     assert not any(x["alert_type"]=="STALE_DATA" for x in alerts)
+
+
+def test_market_universes_are_separate_and_include_popular_crypto():
+    grouped={market:{x["symbol"] for x in ASSETS if x["market"]==market}
+             for market in ("A股","美股","Crypto")}
+    assert all(len(symbols)>=10 for symbols in grouped.values())
+    assert {"BTC","ETH","SOL","BNB","XRP","DOGE","ADA","AVAX","LINK","TRX","TON","SUI"}.issubset(grouped["Crypto"])
+    assert not grouped["A股"] & grouped["美股"]
