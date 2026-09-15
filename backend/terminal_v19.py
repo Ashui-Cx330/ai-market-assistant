@@ -19,7 +19,8 @@ from .database import (connection, list_watchlist, load_news_intelligence,
                        save_news_intelligence, save_provider_health, prediction_statistics,
                        provider_health_snapshot, save_trader_briefing,
                        latest_trader_briefing, save_trader_alert,
-                       list_trader_alerts, acknowledge_trader_alert)
+                       list_trader_alerts, acknowledge_trader_alert,
+                       resolve_trader_alerts)
 from .indicators import calculate_indicators, indicator_payload
 from .market import canonical_symbol, crypto_kline, crypto_quote, stock_kline, stock_quote
 from .news_intelligence import build_intelligence, collect_news
@@ -452,7 +453,7 @@ def _weighted_news_score(items: list[dict]) -> float | None:
 async def watchlist_report(symbol: str, asset_type: str, name: str | None = None) -> dict:
     """Auditable news + V5 mathematical/technical decision report for one watch asset."""
     if asset_type not in {"stock","crypto"}: raise HTTPException(422,"asset_type 仅支持 stock 或 crypto")
-    canonical=canonical_symbol(symbol,asset_type);key=f"watch-report-v1:{asset_type}:{canonical}"
+    canonical=canonical_symbol(symbol,asset_type);key=f"watch-report-v2:{asset_type}:{canonical}"
     if saved:=cache.get(key):
         return {"success":True,"data":{**saved,"cache_status":"FRESH"},"source":saved["data_source"]}
     quote,candles,source=await asyncio.wait_for(_market_pair(canonical,asset_type,"1d",500),timeout=30)
@@ -491,7 +492,8 @@ async def watchlist_report(symbol: str, asset_type: str, name: str | None = None
     signals=sorted([x for x in strategy["signals"] if x["status"]=="AVAILABLE"],
                    key=lambda x:float(x.get("confidence") or 0),reverse=True)[:8]
     report={"symbol":canonical,"name":meta["name"],"asset_type":asset_type,"currency":quote.get("currency"),
-            "current_price":float(quote["price"]),"verdict":direction,"action":action,
+            "current_price":float(quote["price"]),"quote_updated_at":quote.get("updated_at"),
+            "verdict":direction,"action":action,
             "score":combined,"summary":summary,"news":{"items":feed["items"][:20],"count":len(feed["items"]),
             "positive":positive,"negative":negative,"weighted_score":news_score,"window_hours":168 if feed["items"] else 720},
             "components":{"v5_technical":technical_score,"terminal_factors":terminal_score,"news":news_score,"weights":weights},
@@ -515,9 +517,10 @@ def _parse_utc(value: str | None) -> datetime | None:
 
 
 def _briefing_item(report: dict, sample_count: int) -> tuple[dict,list[dict]]:
-    now=datetime.now(timezone.utc);cutoff=_parse_utc(report.get("data_cutoff"))
-    age_hours=round((now-cutoff).total_seconds()/3600,1) if cutoff else None
-    stale_limit=8 if report["asset_type"]=="crypto" else 96
+    now=datetime.now(timezone.utc);analysis_cutoff=_parse_utc(report.get("data_cutoff"))
+    freshness_cutoff=_parse_utc(report.get("quote_updated_at")) or analysis_cutoff
+    age_hours=round((now-freshness_cutoff).total_seconds()/3600,1) if freshness_cutoff else None
+    stale_limit=2 if report["asset_type"]=="crypto" else 96
     stale=age_hours is None or age_hours>stale_limit
     price=float(report.get("current_price") or report["risk_plan"]["entry"])
     exit_line=float(report["risk_plan"]["exit_line"])
@@ -540,6 +543,7 @@ def _briefing_item(report: dict, sample_count: int) -> tuple[dict,list[dict]]:
           "currency":report.get("currency"),"current_price":price,"verdict":report["verdict"],
           "action":report["action"],"score":report["score"],"decision_gate":gate,
           "next_action":next_action,"priority":priority,"data_cutoff":report.get("data_cutoff"),
+          "freshness_cutoff":freshness_cutoff.isoformat() if freshness_cutoff else None,
           "age_hours":age_hours,"is_stale":stale,"evidence_grade":evidence_grade,
           "resolved_samples":sample_count,"risk_plan":report["risk_plan"],
           "components":report["components"],"summary":report["summary"],"headlines":headlines,
@@ -588,6 +592,8 @@ async def _refresh_trader_briefing() -> None:
                         "detail":f"{old.get('verdict')} / {old.get('decision_gate')} → {item['verdict']} / {item['decision_gate']}",
                         "data_cutoff":item["data_cutoff"],"created_at":datetime.now(timezone.utc).isoformat()})
                 items.append(item);alerts.extend(new_alerts)
+                if not item["is_stale"]:
+                    await asyncio.to_thread(resolve_trader_alerts,item["symbol"],item["asset_type"],"STALE_DATA")
             except Exception as exc:
                 errors.append({"symbol":asset["symbol"],"asset_type":asset["asset_type"],"error":str(exc)})
     await asyncio.gather(*(one(asset) for asset in assets))
@@ -597,10 +603,10 @@ async def _refresh_trader_briefing() -> None:
         "data_cutoff":max((x.get("data_cutoff") or "" for x in items),default=None),"items":items,"errors":errors,
         "coverage":{"requested":len(assets),"completed":len(items),"failed":len(errors)},
         "research_status":"NO EDGE","production_model":"NONE","decision_policy":"RISK_FIRST_NO_AUTO_TRADING",
-        "notice":"决策台用于压缩研究与风险复核时间，不是买卖指令或收益承诺。"}
+        "briefing_version":"2","notice":"决策台用于压缩研究与风险复核时间，不是买卖指令或收益承诺。"}
     await asyncio.to_thread(save_trader_briefing,payload)
     for alert in alerts: await asyncio.to_thread(save_trader_alert,alert)
-    cache.set("trader-briefing-v1",payload,300)
+    cache.set("trader-briefing-v2",payload,300)
     _BRIEFING_REFRESH.update(status="COMPLETED",completed_at=generated,error=None)
 
 
@@ -616,9 +622,9 @@ def _start_briefing_refresh() -> None:
 
 @router.get("/trader-briefing")
 async def trader_briefing(refresh: bool = False) -> dict:
-    payload=cache.get("trader-briefing-v1") or await asyncio.to_thread(latest_trader_briefing)
+    payload=cache.get("trader-briefing-v2") or await asyncio.to_thread(latest_trader_briefing)
     generated=_parse_utc((payload or {}).get("generated_at"))
-    expired=not generated or (datetime.now(timezone.utc)-generated)>timedelta(minutes=15)
+    expired=(payload or {}).get("briefing_version")!="2" or not generated or (datetime.now(timezone.utc)-generated)>timedelta(minutes=15)
     if refresh or expired: _start_briefing_refresh()
     if not payload:
         payload={"snapshot_id":None,"generated_at":None,"data_cutoff":None,"items":[],"errors":[],

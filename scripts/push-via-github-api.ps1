@@ -45,7 +45,19 @@ try {
       $entries += @{ path=$repoPath; mode='100644'; type='blob'; sha=$null }
       continue
     }
-    $bytes = [IO.File]::ReadAllBytes((Join-Path (Get-Location) $file))
+    # Upload the exact committed blob, not the checked-out Windows file.
+    # core.autocrlf may turn LF into CRLF in the worktree; reading that file
+    # creates a different tree and makes this safety check reject a valid push.
+    $blobTemp = Join-Path $env:TEMP ("ai-market-blob-" + [guid]::NewGuid().ToString('N'))
+    try {
+      $git = (Get-Command git).Source
+      $extract = Start-Process -FilePath $git -ArgumentList @('cat-file','blob',"HEAD:$repoPath") `
+        -RedirectStandardOutput $blobTemp -Wait -PassThru -WindowStyle Hidden
+      if ($extract.ExitCode -ne 0) { throw "Unable to read committed blob: $repoPath" }
+      $bytes = [IO.File]::ReadAllBytes($blobTemp)
+    } finally {
+      if (Test-Path -LiteralPath $blobTemp) { Remove-Item -LiteralPath $blobTemp -Force }
+    }
     $blob = Invoke-GhJson "repos/$Owner/$Repo/git/blobs" @{ content=[Convert]::ToBase64String($bytes); encoding='base64' }
     $index = (& git ls-files -s -- $file | Select-Object -First 1)
     $mode = if ($index -match '^(\d{6})\s') { $Matches[1] } else { '100644' }

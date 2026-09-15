@@ -37,7 +37,7 @@ type Page =
   | "copilot"
   | "settings";
 const page = ref<Page>("home"),
-  appVersion = ref("1.15.0"),
+  appVersion = ref("1.15.1"),
   pageLoading = ref(false),
   pageError = ref("");
 const dashboard = ref<any>(null),
@@ -2004,7 +2004,7 @@ onBeforeUnmount(() => {
             <div class="briefing-score">
               <div><span>研究结论</span><strong>{{ x.action }}</strong><small>综合分 {{ number(x.score) }}</small></div>
               <div><span>证据等级</span><strong :class="x.evidence_grade === 'D' ? 'warning' : ''">{{ x.evidence_grade }}</strong><small>{{ x.resolved_samples }} 个已结算样本</small></div>
-              <div><span>现价</span><strong>{{ money(x.current_price, x.currency) }}</strong><small>截止 {{ timeLabel(x.data_cutoff) }}</small></div>
+              <div><span>现价</span><strong>{{ money(x.current_price, x.currency) }}</strong><small>报价 {{ timeLabel(x.freshness_cutoff || x.data_cutoff) }}</small></div>
               <div><span>止损 / 离场线</span><strong class="negative">{{ money(x.risk_plan.exit_line, x.currency) }}</strong><small>{{ x.is_stale ? "数据过期，决策门已关" : "仅在对应方向成立时使用" }}</small></div>
             </div>
             <p>{{ x.summary }}</p>

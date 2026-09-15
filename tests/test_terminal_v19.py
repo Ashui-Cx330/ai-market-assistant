@@ -80,7 +80,8 @@ def test_recent_high_impact_news_receives_more_weight():
 def test_trader_briefing_closes_gate_for_stale_or_breached_data():
     report={"symbol":"BTC","name":"Bitcoin","asset_type":"crypto","currency":"USDT",
             "current_price":90,"verdict":"偏多","action":"做多观察","score":25,
-            "data_cutoff":(datetime.now(timezone.utc)-timedelta(hours=10)).isoformat(),
+            "quote_updated_at":(datetime.now(timezone.utc)-timedelta(hours=10)).isoformat(),
+            "data_cutoff":datetime.now(timezone.utc).date().isoformat(),
             "data_source":"observed test source","summary":"test","components":{},
             "risk_plan":{"entry":100,"exit_line":95,"take_profits":[]},
             "news":{"count":0,"items":[]}}
@@ -89,3 +90,16 @@ def test_trader_briefing_closes_gate_for_stale_or_breached_data():
     assert item["evidence_grade"]=="D"
     assert {x["alert_type"] for x in alerts}=={"EXIT_LINE_BREACH","STALE_DATA"}
     assert any("NO EDGE" in blocker for blocker in item["blockers"])
+
+
+def test_crypto_daily_candle_timestamp_does_not_override_fresh_quote():
+    now=datetime.now(timezone.utc)
+    report={"symbol":"BTC","name":"Bitcoin","asset_type":"crypto","currency":"USDT",
+            "current_price":100,"verdict":"中性","action":"等待确认","score":0,
+            "quote_updated_at":now.isoformat(),"data_cutoff":now.date().isoformat(),
+            "data_source":"observed test source","summary":"test","components":{},
+            "risk_plan":{"entry":100,"exit_line":90,"take_profits":[]},"news":{"count":0,"items":[]}}
+    item,alerts=_briefing_item(report,120)
+    assert item["is_stale"] is False
+    assert item["evidence_grade"]=="C"
+    assert not any(x["alert_type"]=="STALE_DATA" for x in alerts)

@@ -722,6 +722,17 @@ def acknowledge_trader_alert(alert_id: int) -> bool:
         return cursor.rowcount > 0
 
 
+def resolve_trader_alerts(symbol: str, asset_type: str, alert_type: str) -> int:
+    """Close operational alerts after the condition is no longer present."""
+    with connection() as conn:
+        cursor = conn.execute(
+            """UPDATE trader_alerts SET acknowledged_at=CURRENT_TIMESTAMP
+               WHERE symbol=? AND asset_type=? AND alert_type=? AND acknowledged_at IS NULL""",
+            (symbol, asset_type, alert_type),
+        )
+        return cursor.rowcount
+
+
 def save_quant_research_run(result: dict) -> str:
     run_id = str(uuid.uuid4())
     dataset_version = result.get("dataset_audit", {}).get("dataset_version", "unknown")

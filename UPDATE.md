@@ -1,6 +1,12 @@
 # AI行情助手自动更新与发布
 
-当前正式版本：**v1.15.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。GitHub Release 同时发布 Windows 安装包、`.blockmap` 和 `latest.yml`，旧版客户端可据此检查、下载并安装更新。
+当前正式版本：**v1.15.1**。更新仓库：`Ashui-Cx330/ai-market-assistant`。GitHub Release 同时发布 Windows 安装包、`.blockmap` 和 `latest.yml`，旧版客户端可据此检查、下载并安装更新。
+
+## v1.15.1 / Freshness Semantics Fix
+
+- Crypto 新鲜度改用实时报价更新时间，日 K 当日 00:00 仅作为分析周期截止，不再误报行情过期。
+- 分离“报价新鲜度”和“技术分析截止时间”，界面明确标注报价时间。
+- 数据恢复新鲜后自动关闭对应 `STALE_DATA` 提醒，并升级简报缓存版本，避免沿用旧误判。
 
 ## v1.15.0 / Trader Decision Desk
 
