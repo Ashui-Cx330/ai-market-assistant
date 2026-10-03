@@ -4,7 +4,12 @@ const path = require('node:path')
 
 const root = path.resolve(__dirname, '..')
 const testData = path.join(root, 'work', 'desktop-e2e-data')
+if (path.dirname(testData) !== path.join(root, 'work')) throw new Error('Unsafe E2E data path')
 if (process.env.AI_E2E_FRESH === '1') fs.rmSync(testData, { recursive: true, force: true })
+const testRoaming = path.join(testData, 'profile', 'Roaming')
+const testLocal = path.join(testData, 'profile', 'Local')
+fs.mkdirSync(testRoaming, { recursive: true })
+fs.mkdirSync(testLocal, { recursive: true })
 
 async function nav(page, label, heading) {
   await page.locator('.terminal-sidebar nav button').filter({ hasText: label }).click()
@@ -17,7 +22,10 @@ async function run() {
   const app = await electron.launch({
     executablePath: packaged ? path.join(root, 'outputs', 'desktop', 'win-unpacked', 'AI行情助手.exe') : path.join(__dirname, 'node_modules', 'electron', 'dist', 'electron.exe'),
     args: packaged ? [] : [path.join(__dirname, 'main.cjs')], cwd: root, timeout: 60000,
-    env: { ...process.env, TRADING_AI_DESKTOP_PORT: '18766', TRADING_AI_TEST_DATA_DIR: testData }
+    // Electron's userData and updater ledger must both stay in the test profile.
+    // TRADING_AI_TEST_DATA_DIR alone only isolates the Python database.
+    env: { ...process.env, APPDATA: testRoaming, LOCALAPPDATA: testLocal,
+      TRADING_AI_DESKTOP_PORT: '18766', TRADING_AI_TEST_DATA_DIR: testData }
   })
   try {
     const page = await app.firstWindow({ timeout: 90000 })
