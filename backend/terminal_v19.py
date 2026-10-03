@@ -433,7 +433,7 @@ async def _refresh_watchlist_news() -> None:
     slots=asyncio.Semaphore(3)
     async def one(asset: dict) -> None:
         async with slots:
-            rows,statuses=await collect_news(asset["symbol"],asset.get("name"),limit=30)
+            rows,statuses=await collect_news(asset["symbol"],asset.get("name"),limit=30,asset_type=asset["asset_type"])
             if rows:
                 analyzed=build_intelligence(rows,asset["symbol"],asset.get("name"))["all_news"]
                 await asyncio.to_thread(save_news_intelligence,analyzed,asset["symbol"])

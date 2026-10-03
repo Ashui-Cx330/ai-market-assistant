@@ -1,10 +1,11 @@
 import os
-import shutil
+import tempfile
 from pathlib import Path
 
-TEST_DATA = (Path(__file__).resolve().parent.parent / "work" / "backend-live-test-data").resolve()
-if TEST_DATA.exists():
-    shutil.rmtree(TEST_DATA)
+WORK_DIR = (Path(__file__).resolve().parent.parent / "work").resolve()
+WORK_DIR.mkdir(parents=True, exist_ok=True)
+TEST_TEMP = tempfile.TemporaryDirectory(prefix="backend-live-", dir=WORK_DIR)
+TEST_DATA = Path(TEST_TEMP.name).resolve()
 os.environ["TRADING_AI_DATA_DIR"] = str(TEST_DATA)
 
 import backend.database as database
@@ -42,8 +43,8 @@ def test_complete_real_data_chain():
         assert len(crypto_kline["candles"]) >= 250 and crypto_kline["indicators"]["latest"]["rsi"] is not None
 
         prediction = assert_ok(client.post("/api/ai/predict", json={"symbol": "BTC", "asset_type": "crypto", "interval": "1h"}))
-        assert prediction["model"]["name"] == "PerformanceWeightedEnsemble" and prediction["model"]["walk_forward"] is True
-        assert {"LogisticRegression", "RandomForest", "XGBoost", "LightGBM"}.issubset(prediction["model"]["models"])
+        assert prediction["model"]["name"] == "XGBoost方向分类器" and prediction["model"]["walk_forward"] is True
+        assert prediction["model"]["models"] == ["XGBoost"]
         assert prediction["model"]["purged_cv"] and prediction["model"]["embargo"]
         available_horizons=0
         for horizon in ("1H", "4H", "1D"):
@@ -55,6 +56,7 @@ def test_complete_real_data_chain():
             assert abs(p["prob_up"] + p["prob_flat"] + p["prob_down"] - 100) < 0.02
             assert p["walk_forward_samples"] > 0
             assert p["validation_scheme"]["leakage_check"] is True
+            assert p["model_level"] == "EXPERIMENTAL"
         assert available_horizons >= 1
         research=prediction["decision_center"]["research"]
         assert research["path_risk"]["status"] == "AVAILABLE"
@@ -90,5 +92,4 @@ def test_complete_real_data_chain():
 
 
 def teardown_module():
-    if TEST_DATA.exists():
-        shutil.rmtree(TEST_DATA)
+    TEST_TEMP.cleanup()

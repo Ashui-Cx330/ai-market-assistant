@@ -54,6 +54,16 @@ async function run() {
     await page.locator('.info-tip').filter({ hasText: 'RSI' }).waitFor()
     await page.locator('.ai-score strong').waitFor({ timeout: 60000 })
 
+    await nav(page, 'A股行情', 'A股行情')
+    await page.locator('.scanner-table tbody tr').first().waitFor({ timeout: 90000 })
+    await nav(page, '热门币种', '热门币种行情')
+    await page.locator('.scanner-table tbody tr').first().waitFor({ timeout: 90000 })
+    await nav(page, '我的自选', '我的自选')
+    await page.locator('.workspace').first().waitFor()
+    await nav(page, '走势预测', 'AI 研究预测')
+    await page.getByRole('heading', { name: '下一段走势 · 量价模型' }).waitFor()
+    await page.getByRole('button', { name: '运行真实预测' }).waitFor()
+
     await nav(page, '模型表现', '模型表现')
     await page.getByText(/不可变已结算历史/).waitFor()
     await page.getByText(/禁止随机切分/).waitFor()
@@ -65,6 +75,10 @@ async function run() {
     await nav(page, '策略实验室', '策略实验室')
     await page.getByRole('button', { name: '转换为可执行规则' }).click()
     await page.getByText('HOLD_BARS 5').waitFor()
+
+    await nav(page, '历史回测', '历史回测')
+    await page.getByRole('button', { name: '运行回测' }).click()
+    await page.locator('.backtest-report').waitFor({ timeout: 90000 })
 
     await nav(page, '模拟交易', '模拟交易')
     await page.locator('.order-ticket').waitFor({ timeout: 60000 })
@@ -100,7 +114,7 @@ async function run() {
     } catch (error) {
       console.warn('WARN acceptance screenshot skipped:', error.message)
     }
-    console.log(`PASS ${packaged ? 'packaged' : 'development'} v1.17 decision-desk/routes/scanner/chart/model-lab/strategy/paper/copilot/news/data-health`)
+    console.log(`PASS ${packaged ? 'packaged' : 'development'} v1.17.1 markets/watchlist/prediction-route/backtest/decision-desk/chart/model-lab/strategy/paper/copilot/news/data-health`)
     complete = true
   } finally {
     await app.close()

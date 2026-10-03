@@ -1,6 +1,13 @@
 # AI行情助手自动更新与发布
 
-当前正式版本：**v1.17.0**。更新仓库：`Ashui-Cx330/ai-market-assistant`。GitHub Release 同时发布 Windows 安装包、`.blockmap` 和 `latest.yml`，旧版客户端可据此检查、下载并安装更新。
+当前正式版本：**v1.17.1**。更新仓库：`Ashui-Cx330/ai-market-assistant`。GitHub Release 同时发布 Windows 安装包、`.blockmap` 和 `latest.yml`，旧版客户端可据此检查、下载并安装更新。
+
+## v1.17.1 / 自检与新闻选源修复
+
+- 修复美股代码被误判为币种、从加密货币媒体采集新闻的问题；A股、美股和币种现在按明确资产类型选择对应新闻源。
+- 真实源检查：NVDA 从 Yahoo Finance 获取相关新闻，BTC 仍从 CoinDesk/Cointelegraph 获取相关新闻；外部源可用性仍取决于当前网络。
+- 真实数据测试改用每次独立的临时数据库，不会清理历史测试目录；断言同步到新版 XGBoost 引擎。
+- 扩展打包版验收，覆盖 A股、币种、自选、预测入口和真实回测报告；60 秒 OKX WebSocket 连续更新检查通过。
 
 ## v1.17.0 / 未来走势研究模型与研究工作台
 

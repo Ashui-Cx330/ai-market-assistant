@@ -48,7 +48,7 @@ def _valid(text):return bool(text.strip()) and text.count("�")<=max(1,len(text
 
 @dataclass(slots=True)
 class NewsQuery:
-    symbol:str|None=None;name:str|None=None;sector:str|None=None;keyword:str|None=None;market:str|None=None;limit:int=30;page:int=1
+    symbol:str|None=None;name:str|None=None;sector:str|None=None;keyword:str|None=None;market:str|None=None;limit:int=30;page:int=1;asset_type:str|None=None
 
 class NewsProvider(ABC):
     provider_type="NewsProvider";markets=("全球",)
@@ -120,11 +120,13 @@ RSS_PROVIDERS=(
 
 def providers_for(q,historical=False):
     if historical:return [EastmoneyAnnouncementProvider()] if q.symbol and re.fullmatch(r"\d{6}",q.symbol) else []
-    out=[EastmoneyAnnouncementProvider()]
+    cn_symbol=bool(q.symbol and re.fullmatch(r"\d{6}",q.symbol))
+    crypto=q.asset_type=="crypto" or (q.asset_type is None and q.market=="加密货币")
+    out=[EastmoneyAnnouncementProvider()] if cn_symbol or (not q.symbol and q.market in (None,"全部","全球","A股")) else []
     for p in RSS_PROVIDERS:
         if q.market and q.market not in ("全部","全球") and q.market not in p.markets:continue
         if q.symbol:
-            crypto=not re.fullmatch(r"\d{6}",q.symbol)
+            if cn_symbol:continue
             if crypto != ("加密货币" in p.markets):continue
         out.append(p)
     return out
@@ -152,7 +154,7 @@ async def _collect(q,historical=False):
         else:rows.extend(r);status.append({"provider":p.provider_type,"status":"HEALTHY","count":len(r),"latency_ms":round((time.perf_counter()-started)*1000),"error":None,"markets":p.markets})
     return _dedupe(rows),status
 def _provider_symbol(symbol):return re.sub(r"\.(SH|SZ)$","",str(symbol or "").upper()) or None
-async def collect_news(symbol=None,name=None,market=None,keyword=None,limit=30):return await _collect(NewsQuery(_provider_symbol(symbol),name,keyword=keyword,market=market,limit=limit))
+async def collect_news(symbol=None,name=None,market=None,keyword=None,limit=30,asset_type=None):return await _collect(NewsQuery(_provider_symbol(symbol),name,keyword=keyword,market=market,limit=limit,asset_type=asset_type))
 async def collect_historical_news(symbol,name=None,limit=100,pages=3):
     symbol=_provider_symbol(symbol)
     rows=[];statuses=[]

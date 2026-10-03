@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from backend.news_intelligence import (EventExtractionEngine, NewsQuery, _dedupe,
-                                       _filter, build_intelligence,
+                                       _filter, build_intelligence, providers_for,
                                        event_backtest, structured_similarity)
 
 
@@ -61,6 +61,15 @@ def test_symbol_filter_and_fuzzy_dedup_are_deterministic():
     rows=_filter([a,b],NewsQuery(symbol="NVDA",name="英伟达"))
     merged=_dedupe(rows)
     assert len(merged)==1 and merged[0]["related_source_count"]==2
+
+
+def test_symbol_news_providers_follow_asset_type_not_ticker_shape():
+    us = {p.provider_type for p in providers_for(NewsQuery(symbol="NVDA", asset_type="stock"))}
+    crypto = {p.provider_type for p in providers_for(NewsQuery(symbol="BTC", asset_type="crypto"))}
+    cn = {p.provider_type for p in providers_for(NewsQuery(symbol="600519", asset_type="stock"))}
+    assert "YahooFinanceProvider" in us and "CoinDeskProvider" not in us
+    assert "CoinDeskProvider" in crypto and "YahooFinanceProvider" not in crypto
+    assert cn == {"EastmoneyAnnouncementProvider"}
 
 
 def test_backtest_filters_direction_and_uses_trading_bars_for_t10():

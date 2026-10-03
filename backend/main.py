@@ -330,7 +330,7 @@ async def news_intelligence(symbol: str | None = None, asset_type: str = "stock"
                             keyword: str | None = None, hours: int | None = Query(default=None, ge=1, le=24*365),
                             page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100)) -> dict:
     normalized = resolved_symbol(symbol, asset_type) if symbol else symbol
-    rows, statuses = await collect_news(normalized, name, market, keyword, 50)
+    rows, statuses = await collect_news(normalized, name, market, keyword, 50, asset_type=asset_type)
     technical_score = volume_ratio = None
     if normalized:
         states = await realtime_manager.store.asset_states(asset_type, normalized)
