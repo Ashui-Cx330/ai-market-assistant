@@ -2,17 +2,16 @@
 defineProps<{page:string;version:string}>()
 const emit=defineEmits<{(e:'navigate',page:string):void}>()
 const groups=[
-  {label:'市场',items:[['home','⌂','首页'],['briefing','◈','交易决策台'],['cnMarket','沪','A股行情'],['usMarket','美','美股行情'],['cryptoMarket','币','热门币种'],['watchlist','☆','自选']]},
-  {label:'AI 分析',items:[['screener','⌕','智能选股'],['prediction','◎','AI 研究预测'],['quantResearch','∑','量化研究'],['modelLab','◫','模型表现'],['news','◉','新闻情报']]},
-  {label:'策略',items:[['strategy','⌘','策略实验室'],['backtest','↗','回测']]},
-  {label:'交易',items:[['paper','▣','模拟交易']]},
-  {label:'AI',items:[['copilot','✦','AI 市场助手']]},
-  {label:'系统',items:[['settings','⚙','设置']]},
+  {label:'01 · 工作台',items:[['home','◧','市场总览'],['briefing','◈','交易决策台'],['watchlist','☆','我的自选']]},
+  {label:'02 · 市场',items:[['cnMarket','沪','A股行情'],['usMarket','美','美股行情'],['cryptoMarket','币','热门币种']]},
+  {label:'03 · 预测与证据',items:[['prediction','◎','走势预测'],['screener','⌕','智能选股'],['news','◉','新闻情报'],['quantResearch','∑','量化研究'],['modelLab','◫','模型表现']]},
+  {label:'04 · 验证与模拟',items:[['strategy','⌘','策略实验室'],['backtest','↗','历史回测'],['paper','▣','模拟交易']]},
+  {label:'05 · 系统',items:[['copilot','✦','AI 市场助手'],['settings','⚙','设置与数据健康']]},
 ]
 </script>
 <template>
   <aside class="terminal-sidebar">
-    <div class="brand"><div class="logo">AI</div><div><b>AI行情助手</b><small>专业终端 v{{version}}</small></div></div>
+    <div class="brand"><div class="logo">A</div><div><b>AI行情助手</b><small>QUANT STUDIO · v{{version}}</small></div></div>
     <nav>
       <section v-for="group in groups" :key="group.label">
         <label>{{group.label}}</label>
@@ -21,6 +20,6 @@ const groups=[
         </button>
       </section>
     </nav>
-    <div class="research-note"><b>研究与模拟模式</b><span>概率评分与回测不构成投资建议。</span></div>
+    <div class="research-note"><b>● 研究模式</b><span>预测须经过样本外验证；未达标时仅供观察。</span></div>
   </aside>
 </template>

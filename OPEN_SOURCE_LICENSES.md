@@ -21,6 +21,10 @@
 
 此前调研过 Freqtrade/FreqAI、Microsoft Qlib 和 FinRL，但当前 v0.3.0 未复制、链接或打包这些项目的代码。
 
+## v1.17.0 预测方法来源
+
+参考 [pic-asso/quant-backtest](https://github.com/pic-asso/quant-backtest) 的 XGBoost 方向分类与滚动样本外验证研究流程。其 README 标注 MIT；本项目没有复制、链接或打包该仓库代码。实际运行依赖仍为本项目已包含的 XGBoost、NumPy、pandas 和 scikit-learn。第三方项目本身明确定位为学习工具，并不证明真实交易收益。
+
 ## V7 新闻情报调研（未打包、未复制）
 
 | 项目 | License 核查 | 处理决定 |

@@ -90,14 +90,17 @@ async function run() {
     await nav(page, '设置', '设置与数据健康')
     await page.getByRole('heading', { name: '数据健康状态', exact: true }).waitFor({ timeout: 60000 })
     await page.getByText(/不属于交易所授权逐笔行情/).waitFor()
-    await nav(page, '首页', '市场智能总览')
+    await nav(page, '市场总览', '市场智能总览')
+    await page.locator('.studio-hero').waitFor({ timeout: 90000 })
+    await page.locator('.page-skeleton').waitFor({ state: 'hidden', timeout: 90000 })
     await page.locator('.pulse-score strong').waitFor({ timeout: 90000 })
+    await page.locator('.copilot-drawer button').first().click()
     try {
       await page.screenshot({ path: path.join(root, 'work', 'v19-home.png'), fullPage: true, timeout: 60000 })
     } catch (error) {
       console.warn('WARN acceptance screenshot skipped:', error.message)
     }
-    console.log(`PASS ${packaged ? 'packaged' : 'development'} v1.16 decision-desk/routes/scanner/chart/model-lab/strategy/paper/copilot/news/data-health`)
+    console.log(`PASS ${packaged ? 'packaged' : 'development'} v1.17 decision-desk/routes/scanner/chart/model-lab/strategy/paper/copilot/news/data-health`)
     complete = true
   } finally {
     await app.close()

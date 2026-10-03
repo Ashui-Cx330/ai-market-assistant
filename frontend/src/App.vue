@@ -40,7 +40,7 @@ type Page =
   | "copilot"
   | "settings";
 const page = ref<Page>("home"),
-  appVersion = ref("1.16.0"),
+  appVersion = ref("1.17.0"),
   pageLoading = ref(false),
   pageError = ref("");
 const dashboard = ref<any>(null),
@@ -254,6 +254,7 @@ const marketPageMap: Record<string, string> = {
 };
 const chineseTerms: Record<string, string> = {
   trend: "趋势", technical: "技术指标", news: "新闻情绪", momentum: "动量", risk: "风险",
+  sentiment: "市场情绪", volume: "成交量",
   positive: "正向", negative: "负向", UP: "上涨", DOWN: "下跌", SIDEWAYS: "震荡",
   AVAILABLE: "可用", "INSUFFICIENT DATA": "数据不足", HIGH: "高", MEDIUM: "中", LOW: "低",
   PASSED: "通过", RUNNING: "运行中", QUEUED: "排队中", COMPLETED: "已完成",
@@ -263,6 +264,10 @@ const chineseTerms: Record<string, string> = {
   "Pre-market": "盘前", CONNECTED: "已连接", DISCONNECTED: "未连接",
   RISK_REVIEW: "优先复核风险", WATCH_ONLY: "仅观察", NO_ACTION: "暂不行动",
   EXPERIMENTAL: "实验阶段", STALE: "数据陈旧", DEGRADED: "服务降级",
+  NO_CLEAR_EDGE: "暂无可靠优势", ACTIONABLE_CANDIDATE: "研究候选信号",
+  MODEL_DISAGREEMENT: "模型分歧", PROBABILITY_MARGIN_TOO_SMALL: "方向概率差距过小",
+  DATA_QUALITY: "数据质量不足", LIMITED_SAMPLE: "样本数量有限",
+  NO_VALIDATED_BASELINE_EDGE: "未证明优于简单基准",
 };
 function zh(value: unknown) {
   const text = String(value ?? "—");
@@ -1230,6 +1235,23 @@ onBeforeUnmount(() => {
         v-else-if="page === 'home' && dashboard"
         class="workspace home-workspace"
       >
+        <div class="studio-hero">
+          <div>
+            <span>QUANT RESEARCH WORKSPACE</span>
+            <h2>从市场变化到可验证的走势推断</h2>
+            <p>选择市场与标的，查看真实行情，再用样本外结果判断模型是否值得参考。</p>
+          </div>
+          <div class="studio-actions">
+            <button @click="nav('watchlist')">我的自选</button>
+            <button class="primary" @click="nav('prediction')">进入走势预测 →</button>
+          </div>
+        </div>
+        <div class="studio-steps">
+          <button @click="nav('cnMarket')"><b>01</b><span>A股行情</span><small>查看价格与量价证据 →</small></button>
+          <button @click="nav('usMarket')"><b>02</b><span>美股行情</span><small>选择研究标的 →</small></button>
+          <button @click="nav('cryptoMarket')"><b>03</b><span>热门币种</span><small>检查连续市场数据 →</small></button>
+          <button @click="nav('modelLab')"><b>04</b><span>模型验证</span><small>核对样本外表现 →</small></button>
+        </div>
         <div class="market-status strip">
           <div v-for="x in dashboard.market_status" :key="x.market">
             <i :class="statusTone(x.status)"></i><b>{{ x.market }}</b
@@ -1250,7 +1272,7 @@ onBeforeUnmount(() => {
               v-for="key in ['trend', 'sentiment', 'volume', 'news', 'risk']"
               :key="key"
             >
-              <span>{{ key }}</span
+              <span>{{ zh(key) }}</span
               ><i><em :style="{ width: dashboard.pulse[key] + '%' }"></em></i
               ><b>{{ dashboard.pulse[key] }}</b>
             </div>
@@ -1834,8 +1856,8 @@ onBeforeUnmount(() => {
         <div class="action-header">
           <div>
             <span>AI 研究预测 · {{ selected?.symbol }}</span>
-            <h2>历史实验模型基准</h2>
-            <p>生产模型：无。下列概率只作为历史模型研究基线；样本不足时不生成。</p>
+            <h2>下一段走势 · 量价模型</h2>
+            <p>使用 XGBoost 对未来交易周期的上涨、震荡、下跌做分类；滚动样本外结果低于基准时仅显示研究结论。</p>
           </div>
           <button class="primary" @click="runAI" :disabled="aiLoading">
             {{ aiLoading ? "训练与验证中…" : "运行真实预测" }}
@@ -1867,7 +1889,7 @@ onBeforeUnmount(() => {
             ><span
               >数据截止 <b>{{ timeLabel(aiResult.data_time) }}</b></span
             ><span
-              >训练状态 <b>{{ aiResult.model.training_status }}</b></span
+              >训练状态 <b>{{ aiResult.model.training_status === 'retrained' ? '已重新训练' : '从本机载入' }}</b></span
             ><span>验证 <b>防泄漏时间序列滚动验证</b></span>
           </div>
           <div class="outlook-grid">
@@ -1883,9 +1905,7 @@ onBeforeUnmount(() => {
                 }}</span>
               </header>
               <template v-if="x.prediction"
-                ><strong>{{
-                  x.actionable_prediction || x.decision_status || x.prediction
-                }}</strong>
+                ><strong>{{ zh(x.actionable_prediction || x.decision_status || x.prediction) }}</strong>
                 <div class="prob-bars">
                   <label
                     >上涨
@@ -1917,8 +1937,8 @@ onBeforeUnmount(() => {
                 >
                 <p>{{ x.advantage_message }}</p>
                 <small v-if="x.uncertainty?.reasons?.length" class="warning"
-                  >不确定性 {{ x.uncertainty.level }} ·
-                  {{ x.uncertainty.reasons.join(" / ") }}</small
+                  >不确定性 {{ zh(x.uncertainty.level) }} ·
+                  {{ x.uncertainty.reasons.map(zh).join(" / ") }}</small
                 ></template
               >
               <p v-else>{{ x.message }}</p>

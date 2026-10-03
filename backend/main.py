@@ -581,7 +581,7 @@ async def api_predict(body: PredictionRequest) -> dict:
     model_direction = primary.get("prediction", "FLAT")
     aligned = (tech_signal == "BUY" and model_direction == "UP") or (tech_signal == "SELL" and model_direction == "DOWN")
     positive_ev = technical["risk_plan"]["expected_value"] is not None and technical["risk_plan"]["expected_value"] > 0
-    if aligned and positive_ev and not multi["conflict"]:
+    if aligned and positive_ev and not multi["conflict"] and primary.get("actionable_prediction"):
         final_action = tech_signal
         final_reason = "CALIBRATED_MODEL_AND_DEDUPLICATED_STRATEGIES_ALIGNED_WITH_POSITIVE_EV"
     elif multi["conflict"]:
@@ -589,7 +589,8 @@ async def api_predict(body: PredictionRequest) -> dict:
         final_reason = "HIGHER_TIMEFRAME_CONFLICT"
     else:
         final_action = "HOLD"
-        final_reason = "MODEL_STRATEGY_MISMATCH_OR_NON_POSITIVE_EV"
+        final_reason = ("MODEL_NOT_VALIDATED_AGAINST_BASELINE" if not primary.get("actionable_prediction")
+                        else "MODEL_STRATEGY_MISMATCH_OR_NON_POSITIVE_EV")
     decision["v5_final_decision"] = {
         "action": final_action, "reason": final_reason, "direction": technical["confluence"]["direction"],
         "probabilities": primary.get("probabilities"), "expected_return": research.get("return_distribution",{}).get("expected_return"),
@@ -626,7 +627,7 @@ async def api_predict(body: PredictionRequest) -> dict:
     result["information_cutoff"] = result["data_time"]
     result["snapshot_scope"] = ["price","technical","volume","structure","regime","news","event","fundamental","cross_asset","model_outputs","risk"]
     result["quant_snapshot_id"] = await asyncio.to_thread(save_quant_prediction_snapshot,symbol,body.asset_type,body.interval,result)
-    return ok(result, message="Quant Intelligence V2 因果特征、校准模型、风险与审计快照完成", source=source)
+    return ok(result, message="未来走势 XGBoost 模型、时间滚动验证、风险与审计快照完成", source=source)
 
 
 @app.get("/api/symbol-master/search")

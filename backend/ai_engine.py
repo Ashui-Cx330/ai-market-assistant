@@ -165,6 +165,10 @@ def _model_factories(profile: dict | None = None) -> tuple[dict[str, Callable[[]
                                                        eval_metric="mlogloss", random_state=42, n_jobs=2)
     except Exception as exc:
         unavailable["XGBoost"] = type(exc).__name__
+    if profile.get("forward_direction"):
+        if "XGBoost" not in factories:
+            raise RuntimeError("未来走势模型 XGBoost 不可用，请检查本机模型依赖")
+        return {"XGBoost": factories["XGBoost"]}, unavailable
     try:
         from lightgbm import LGBMClassifier
         factories["LightGBM"] = lambda: LGBMClassifier(n_estimators=220, max_depth=profile["max_depth"], num_leaves=31,
@@ -375,13 +379,13 @@ def _purged_slices(meta: pd.DataFrame, fractions=(.56, .70, .84), embargo_rows: 
             "embargo_rows": embargo_rows}
 
 
-def _walk_forward(x: pd.DataFrame, y: pd.Series, meta: pd.DataFrame, profile=None) -> tuple[dict, int]:
+def _walk_forward(x: pd.DataFrame, y: pd.Series, meta: pd.DataFrame, profile=None, embargo_rows: int = 1) -> tuple[dict, int]:
     factories, _ = _model_factories(profile)
     start = max(100, int(len(x) * .55)); chunk = max(30, int(len(x) * .1))
     predicted: list[int] = []; actual: list[int] = []
     for begin in range(start, len(x), chunk):
         end = min(begin + chunk, len(x)); fold_predictions = []
-        train_end = _purged_train_end(meta, begin, 1)
+        train_end = _purged_train_end(meta, begin, embargo_rows)
         if train_end < 80:
             continue
         for name, factory in factories.items():
@@ -428,7 +432,7 @@ def _fingerprint(frame: pd.DataFrame, interval: str, horizon: str, profile: str)
     latest = pd.Timestamp(frame["timestamp_utc"].iloc[-1])
     refresh = "1h" if interval in {"1m", "5m"} else "4h" if interval != "1d" else "1d"
     training_bucket = latest.floor(refresh)
-    value = f"v6.0-quant-v2-alpha-features-purged-regime|{profile}|{interval}|{horizon}|{training_bucket}"
+    value = f"v7.0-forward-xgboost-purged-walk-forward|{profile}|{interval}|{horizon}|{training_bucket}"
     return hashlib.sha256(value.encode()).hexdigest()
 
 
@@ -442,6 +446,10 @@ def predict(candles: list[dict], interval: str = "1h", asset_type: str = "crypto
     if not horizons: raise ValueError(f"{interval} 无法严格表达 1H/4H/1D 中的任一目标")
     availability = FeatureStore().availability(frame, asset_type)
     asset_profile = _asset_profile(asset_type, symbol, frame)
+    # Direction forecasting follows the XGBoost walk-forward method in
+    # pic-asso/quant-backtest. The existing causal features and horizon-aware
+    # purge/embargo remain because this app also supports intraday and CN data.
+    asset_profile["forward_direction"] = True
     data_completeness = _quality(frame, asset_type, interval)
     latest = frame[FEATURES].dropna().iloc[[-1]]
     manager = ModelManager()
@@ -467,9 +475,9 @@ def predict(candles: list[dict], interval: str = "1h", asset_type: str = "crypto
                 x.iloc[tr0:tr1], y.iloc[tr0:tr1], x.iloc[ca0:ca1], y.iloc[ca0:ca1],
                 x.iloc[va0:va1], y.iloc[va0:va1], x.iloc[te0:te1], y.iloc[te0:te1], asset_profile)
             ensemble_metrics = _metrics(y.iloc[te0:te1], ensemble_test)
-            walk_metrics, walk_samples = _walk_forward(x, y, alignment, asset_profile)
+            walk_metrics, walk_samples = _walk_forward(x, y, alignment, asset_profile, nominal_steps)
             baselines = _baseline_metrics(x.iloc[te0:te1], y.iloc[tr0:tr1], y.iloc[te0:te1])
-            candidate = {"fingerprint": fingerprint, "version": "6.0", "models": fitted, "model_details": details,
+            candidate = {"fingerprint": fingerprint, "version": "7.0", "models": fitted, "model_details": details,
                         "unavailable_models": unavailable, "ensemble_metrics": ensemble_metrics,
                         "walk_forward_metrics": walk_metrics, "walk_forward_samples": walk_samples,
                         "baselines": baselines, "sample_count": len(x), "validation_scheme": {
@@ -513,7 +521,8 @@ def predict(candles: list[dict], interval: str = "1h", asset_type: str = "crypto
         if probability_edge<.08: uncertainty_reasons.append("PROBABILITY_MARGIN_TOO_SMALL")
         if data_completeness<.8: uncertainty_reasons.append("DATA_QUALITY")
         if len(x)<300: uncertainty_reasons.append("LIMITED_SAMPLE")
-        if advantage<.03: uncertainty_reasons.append("NO_VALIDATED_BASELINE_EDGE")
+        if advantage<.03 or artifact["walk_forward_metrics"]["accuracy"] <= baseline_accuracy:
+            uncertainty_reasons.append("NO_VALIDATED_BASELINE_EDGE")
         no_clear_edge=bool(uncertainty_reasons)
         market = "CRYPTO" if asset_type == "crypto" else "CN" if str(symbol).split(".")[0].isdigit() else "US"
         target = future_timestamp(frame["timestamp_utc"].iloc[-1], asset_type, interval, horizon, market)
@@ -528,7 +537,7 @@ def predict(candles: list[dict], interval: str = "1h", asset_type: str = "crypto
             "sample_count":len(x), "data_completeness":data_completeness, "model_consensus":round(consensus,4),
             "consensus_label":"高" if consensus>=.8 else "中" if consensus>=.6 else "低", "models":list(artifact["models"]),
             "model_details":artifact["model_details"], "unavailable_models":artifact["unavailable_models"],
-            "model_selector":{"current_regime":current_regime,"method":"validation-derived regime weight with global fallback",
+            "model_selector":{"current_regime":current_regime,"method":"single XGBoost with validation-derived regime calibration",
                               "minimum_regime_samples":20},
             "model_metrics":artifact["ensemble_metrics"], "walk_forward":{**artifact["walk_forward_metrics"],"samples":artifact["walk_forward_samples"]},
             "validation_scheme":artifact.get("validation_scheme", {"name":"legacy_artifact","leakage_check":False}),
@@ -537,17 +546,17 @@ def predict(candles: list[dict], interval: str = "1h", asset_type: str = "crypto
             "advantage_message":"模型显示样本外优势" if advantage>=.03 else "当前模型暂无明显优势",
             "features":availability["features"], "feature_status":availability["feature_status"],
             "feature_coverage":availability["feature_coverage"], "top_factors":_top_factors(artifact["models"], latest, x),
-            "explanation_method":"validation-weighted tree feature importance", "shap_status":"NOT_AVAILABLE",
+            "explanation_method":"XGBoost tree feature importance", "shap_status":"NOT_AVAILABLE",
             "threshold_percent":round(float(alignment["threshold"].iloc[-1])*100,3), "trained_at":artifact["trained_at"],
             "promotion_decision":artifact.get("promotion_decision","LOADED_CURRENT_MODEL"),
             "decision_status":"NO_CLEAR_EDGE" if no_clear_edge else "ACTIONABLE_CANDIDATE",
             "actionable_prediction":None if no_clear_edge else {-1:"DOWN",0:"FLAT",1:"UP"}[predicted_class],
             "uncertainty":{"level":"HIGH" if len(uncertainty_reasons)>=3 else "MEDIUM" if uncertainty_reasons else "LOW",
                            "reasons":uncertainty_reasons,"probability_margin":round(probability_edge,4)},
-            "model_level":"EXPERIMENTAL" if advantage<.03 else "PRODUCTION_CANDIDATE",
+            "model_level":"EXPERIMENTAL",
         }
     if not any(item.get("prediction") for item in predictions.values()): raise ValueError("所有严格时间目标的样本均不足")
-    return {"engine_version":"6.0 Quant Intelligence V2", "model":{"name":"PerformanceWeightedEnsemble","ensemble_method":"validation-weighted calibrated probabilities","models":sorted(all_models),
+    return {"engine_version":"7.0 未来走势研究模型", "model":{"name":"XGBoost方向分类器","ensemble_method":"单模型校准概率","models":sorted(all_models),
              "asset_profile":asset_profile,
              "training_status":"retrained" if any_retrained else "loaded_from_disk", "split":"Purged Train / Calibration / Validation / untouched Test + horizon embargo",
              "walk_forward":True, "purged_cv":True, "embargo":True}, "predictions":predictions, "feature_availability":availability,

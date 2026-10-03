@@ -80,7 +80,7 @@ class ModelManager:
         schema=candidate.get("version","4.0")
         if not existing or existing.get("version")!=schema:
             self.save(symbol,interval,horizon,candidate);return candidate,"INITIAL_OR_SCHEMA_UPGRADE"
-        if schema=="6.0":
+        if schema in {"6.0", "7.0"}:
             old=existing.get("walk_forward_metrics",{});new=candidate.get("walk_forward_metrics",{})
             accuracy_gain=float(new.get("accuracy",0))-float(old.get("accuracy",0))
             f1_gain=float(new.get("f1_macro",0))-float(old.get("f1_macro",0))
